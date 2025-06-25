@@ -29,8 +29,10 @@ func New(id string, opts ...Option) (Provider, error) {
 	}
 
 	switch config.Type {
-	case ProviderTypeLocal:
-		return NewLocalVault(config)
+	case ProviderTypeAge:
+		return NewAgeVault(config)
+	case ProviderTypeAES256:
+		return NewAES256Vault(config)
 	case ProviderTypeExternal:
 		return nil, fmt.Errorf("external vault provider not implemented yet")
 	}
@@ -44,58 +46,119 @@ func WithProvider(provider ProviderType) Option {
 	}
 }
 
-// WithLocalPath sets the local vault storage fullPath
-func WithLocalPath(path string) Option {
+// WithAgePath sets the age vault storage path
+func WithAgePath(path string) Option {
 	return func(c *Config) {
-		if c.Local == nil {
-			c.Local = &LocalConfig{}
+		if c.Age == nil {
+			c.Age = &AgeConfig{}
 		}
-		c.Local.StoragePath = path
+		c.Age.StoragePath = path
 	}
 }
 
-// WithLocalIdentityFromEnv specifies to retrieve the key from an environment variable for local vaults
-func WithLocalIdentityFromEnv(envVar string) Option {
+// WithAESPath sets the AES vault storage path
+func WithAESPath(path string) Option {
 	return func(c *Config) {
-		if c.Local == nil {
-			c.Local = &LocalConfig{}
+		if c.Aes == nil {
+			c.Aes = &AesConfig{}
 		}
-		if len(c.Local.IdentitySources) == 0 {
-			c.Local.IdentitySources = make([]IdentitySource, 0)
+		c.Aes.StoragePath = path
+	}
+}
+
+// WithLocalPath sets the local vault storage path (works for both Age and AES based on provider type)
+func WithLocalPath(path string) Option {
+	return func(c *Config) {
+		//nolint:exhaustive
+		switch c.Type {
+		case ProviderTypeAge:
+			if c.Age == nil {
+				c.Age = &AgeConfig{}
+			}
+			c.Age.StoragePath = path
+		case ProviderTypeAES256:
+			if c.Aes == nil {
+				c.Aes = &AesConfig{}
+			}
+			c.Aes.StoragePath = path
 		}
-		c.Local.IdentitySources = append(
-			c.Local.IdentitySources,
+	}
+}
+
+// WithAgeIdentityFromEnv specifies to retrieve the age identity from an environment variable
+func WithAgeIdentityFromEnv(envVar string) Option {
+	return func(c *Config) {
+		if c.Age == nil {
+			c.Age = &AgeConfig{}
+		}
+		if len(c.Age.IdentitySources) == 0 {
+			c.Age.IdentitySources = make([]IdentitySource, 0)
+		}
+		c.Age.IdentitySources = append(
+			c.Age.IdentitySources,
 			IdentitySource{Type: "env", Name: envVar},
 		)
 	}
 }
 
-// WithLocalIdentityFromFile specifies to retrieve the key from a file for local vaults
-func WithLocalIdentityFromFile(path string) Option {
+// WithAgeIdentityFromFile specifies to retrieve the age identity from a file
+func WithAgeIdentityFromFile(path string) Option {
 	return func(c *Config) {
-		if c.Local == nil {
-			c.Local = &LocalConfig{}
+		if c.Age == nil {
+			c.Age = &AgeConfig{}
 		}
-		if len(c.Local.IdentitySources) == 0 {
-			c.Local.IdentitySources = make([]IdentitySource, 0)
+		if len(c.Age.IdentitySources) == 0 {
+			c.Age.IdentitySources = make([]IdentitySource, 0)
 		}
-		c.Local.IdentitySources = append(
-			c.Local.IdentitySources,
+		c.Age.IdentitySources = append(
+			c.Age.IdentitySources,
 			IdentitySource{Type: "file", Path: path},
 		)
 	}
 }
 
-// WithRecipients sets the recipients for local vaults
-func WithRecipients(recipients ...string) Option {
+// WithAESKeyFromEnv specifies to retrieve the AES key from an environment variable
+func WithAESKeyFromEnv(envVar string) Option {
 	return func(c *Config) {
-		if c.Local == nil {
-			c.Local = &LocalConfig{}
+		if c.Aes == nil {
+			c.Aes = &AesConfig{}
 		}
-		// if len(c.Local.Recipients) == 0 {
-		// 	c.Local.Recipients = make([]string, len(recipients))
+		if len(c.Aes.KeySource) == 0 {
+			c.Aes.KeySource = make([]KeySource, 0)
+		}
+		c.Aes.KeySource = append(
+			c.Aes.KeySource,
+			KeySource{Type: "env", Name: envVar},
+		)
+	}
+}
+
+// WithAESKeyFromFile specifies to retrieve the AES key from a file
+func WithAESKeyFromFile(path string) Option {
+	return func(c *Config) {
+		if c.Aes == nil {
+			c.Aes = &AesConfig{}
+		}
+		if len(c.Aes.KeySource) == 0 {
+			c.Aes.KeySource = make([]KeySource, 0)
+		}
+		c.Aes.KeySource = append(
+			c.Aes.KeySource,
+			KeySource{Type: "file", Path: path},
+		)
+	}
+}
+
+// WithAgeRecipients sets the recipients for age vaults
+func WithAgeRecipients(recipients ...string) Option {
+	return func(c *Config) {
+		if c.Age == nil {
+			c.Age = &AgeConfig{}
+		}
+		// if len(c.Age.Recipients) == 0 {
+		// 	c.Age.Recipients = make([]string, len(recipients))
 		// }
-		c.Local.Recipients = append(c.Local.Recipients, recipients...)
+		c.Age.Recipients = append(c.Age.Recipients, recipients...)
 	}
 }
 

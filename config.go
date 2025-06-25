@@ -11,14 +11,16 @@ import (
 type ProviderType string
 
 const (
-	ProviderTypeLocal    ProviderType = "local"
+	ProviderTypeAES256   ProviderType = "aes256"
+	ProviderTypeAge      ProviderType = "age"
 	ProviderTypeExternal ProviderType = "external"
 )
 
 type Config struct {
 	ID       string          `json:"id"`
 	Type     ProviderType    `json:"type"`
-	Local    *LocalConfig    `json:"local,omitempty"`
+	Age      *AgeConfig      `json:"age,omitempty"`
+	Aes      *AesConfig      `json:"aes,omitempty"`
 	External *ExternalConfig `json:"external,omitempty"`
 }
 
@@ -28,11 +30,16 @@ func (c *Config) Validate() error {
 	}
 
 	switch c.Type {
-	case ProviderTypeLocal:
-		if c.Local == nil {
-			return fmt.Errorf("local configuration required for local vault")
+	case ProviderTypeAge:
+		if c.Age == nil {
+			return fmt.Errorf("age configuration required for the age vault provider")
 		}
-		return c.Local.Validate()
+		return c.Age.Validate()
+	case ProviderTypeAES256:
+		if c.Aes == nil {
+			return fmt.Errorf("aes configuration required for the aes256 vault provider")
+		}
+		return c.Aes.Validate()
 	case ProviderTypeExternal:
 		if c.External == nil {
 			return fmt.Errorf("external configuration required for external vault")
@@ -79,7 +86,7 @@ func LoadConfigJSON(path string) (Config, error) {
 // IdentitySource represents a source for the local vault identity keys
 type IdentitySource struct {
 	// Type of identity source
-	// Must be one of: "env", "file", "ssh-agent"
+	// Must be one of: "env", "file"
 	Type string `json:"type"`
 	// Path to the identity file (for "file" type)
 	Path string `json:"fullPath,omitempty"`
@@ -87,8 +94,8 @@ type IdentitySource struct {
 	Name string `json:"name,omitempty"`
 }
 
-// LocalConfig contains local (age-based) vault configuration
-type LocalConfig struct {
+// AgeConfig contains local (age-based) vault configuration
+type AgeConfig struct {
 	// Storage location for the vault file
 	StoragePath string `json:"storage_path"`
 
@@ -99,9 +106,63 @@ type LocalConfig struct {
 	Recipients []string `json:"recipients,omitempty"`
 }
 
-func (c *LocalConfig) Validate() error {
+func (c *AgeConfig) Validate() error {
 	if c.StoragePath == "" {
 		return fmt.Errorf("storage fullPath is required for local vault")
+	}
+	if len(c.IdentitySources) == 0 {
+		return fmt.Errorf("at least one identity source is required for local vault")
+	}
+	for _, source := range c.IdentitySources {
+		if source.Type != envSource && source.Type != fileSource {
+			return fmt.Errorf("invalid identity source type: %s", source.Type)
+		}
+		if source.Type == fileSource && source.Path == "" {
+			return fmt.Errorf("path is required for file identity source")
+		}
+		if source.Type == envSource && source.Name == "" {
+			return fmt.Errorf("name is required for env identity source")
+		}
+	}
+	return nil
+}
+
+// KeySource represents a source for the local vault encryption keys
+type KeySource struct {
+	// Type of data encryption key source
+	// Must be one of: "env", "file"
+	Type string `json:"type"`
+	// Path to the identity file (for "file" type)
+	Path string `json:"fullPath,omitempty"`
+	// Environment variable name (for "env" type)
+	Name string `json:"name,omitempty"`
+}
+
+// AesConfig contains local (AES256-based) vault configuration
+type AesConfig struct {
+	// Storage location for the vault file
+	StoragePath string `json:"storage_path"`
+	// DEK sources for decryption (in order of preference)
+	KeySource []KeySource `json:"key_sources,omitempty"`
+}
+
+func (c *AesConfig) Validate() error {
+	if c.StoragePath == "" {
+		return fmt.Errorf("storage fullPath is required for local vault")
+	}
+	if len(c.KeySource) == 0 {
+		return fmt.Errorf("at least one key source is required for local vault")
+	}
+	for _, source := range c.KeySource {
+		if source.Type != envSource && source.Type != fileSource {
+			return fmt.Errorf("invalid key source type: %s", source.Type)
+		}
+		if source.Type == fileSource && source.Path == "" {
+			return fmt.Errorf("path is required for file key source")
+		}
+		if source.Type == envSource && source.Name == "" {
+			return fmt.Errorf("name is required for env key source")
+		}
 	}
 	return nil
 }
