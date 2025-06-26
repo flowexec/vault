@@ -1,5 +1,10 @@
 # Vault
 
+<p>
+    <a href="https://img.shields.io/github/v/release/jahvon/vault"><img src="https://img.shields.io/github/v/release/jahvon/vault" alt="GitHub release"></a>
+    <a href="https://pkg.go.dev/github.com/jahvon/vault"><img src="https://pkg.go.dev/badge/github.com/jahvon/vault.svg" alt="Go Reference"></a>
+</p>
+
 A Go package for secure secret storage with multiple encryption backends. Made for [flow](https://github.com/jahvon/flow) but can be used independently.
 
 ## Quick Start
