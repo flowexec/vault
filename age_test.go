@@ -12,14 +12,11 @@ import (
 func TestAgeIdentityResolver(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Test age identity (private key)
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
-
-	// Test identity from environment
 	t.Setenv("TEST_AGE_IDENTITY", testIdentity)
 
 	resolver := vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "env", Name: "TEST_AGE_IDENTITY"},
+		{Type: "env", Name: "TEST_AGE_IDENTITY"},
 	})
 
 	identities, err := resolver.ResolveIdentities()
@@ -38,7 +35,7 @@ func TestAgeIdentityResolver(t *testing.T) {
 	}
 
 	resolver = vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "file", Path: keyFile},
+		{Type: "file", Path: keyFile},
 	})
 
 	identities, err = resolver.ResolveIdentities()
@@ -51,9 +48,9 @@ func TestAgeIdentityResolver(t *testing.T) {
 
 	// Test multiple sources
 	resolver = vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "env", Name: "NONEXISTENT_IDENTITY"},
-		vault.IdentitySource{Type: "file", Path: keyFile},
-		vault.IdentitySource{Type: "env", Name: "TEST_AGE_IDENTITY"},
+		{Type: "env", Name: "NONEXISTENT_IDENTITY"},
+		{Type: "file", Path: keyFile},
+		{Type: "env", Name: "TEST_AGE_IDENTITY"},
 	})
 
 	identities, err = resolver.ResolveIdentities()
@@ -70,7 +67,7 @@ func TestAgeIdentityResolverErrors(t *testing.T) {
 	t.Setenv("INVALID_AGE_IDENTITY", "not-a-valid-age-key")
 
 	resolver := vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "env", Name: "INVALID_AGE_IDENTITY"},
+		{Type: "env", Name: "INVALID_AGE_IDENTITY"},
 	})
 
 	identities, err := resolver.ResolveIdentities()
@@ -83,7 +80,7 @@ func TestAgeIdentityResolverErrors(t *testing.T) {
 
 	// Test nonexistent file
 	resolver = vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "file", Path: "/nonexistent/path/key.txt"},
+		{Type: "file", Path: "/nonexistent/path/key.txt"},
 	})
 
 	_, err = resolver.ResolveIdentities()
@@ -93,7 +90,7 @@ func TestAgeIdentityResolverErrors(t *testing.T) {
 
 	// Test empty file path
 	resolver = vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "file", Path: ""},
+		{Type: "file", Path: ""},
 	})
 
 	_, err = resolver.ResolveIdentities()
@@ -103,7 +100,7 @@ func TestAgeIdentityResolverErrors(t *testing.T) {
 
 	// Test no valid identities
 	resolver = vault.NewIdentityResolver([]vault.IdentitySource{
-		vault.IdentitySource{Type: "env", Name: "NONEXISTENT_KEY"},
+		{Type: "env", Name: "NONEXISTENT_KEY"},
 	})
 
 	_, err = resolver.ResolveIdentities()
@@ -124,11 +121,8 @@ func TestAgeVaultCreation(t *testing.T) {
 		t.Error("Expected error when creating vault without Age config")
 	}
 
-	// Test age identity and recipient
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
 	testRecipient := "age1wnhg53pg2qfsfxwvxvlg6pygw5uzwcyhj2dqhg0k83fvjexf9pzsxqdvs0"
-
-	// Create identity file
 	keyFile := filepath.Join(tempDir, "test-key.txt")
 	err = os.WriteFile(keyFile, []byte(testIdentity), 0600)
 	if err != nil {
@@ -141,7 +135,7 @@ func TestAgeVaultCreation(t *testing.T) {
 		Age: &vault.AgeConfig{
 			StoragePath: tempDir,
 			IdentitySources: []vault.IdentitySource{
-				vault.IdentitySource{Type: "file", Path: keyFile},
+				{Type: "file", Path: keyFile},
 			},
 			Recipients: []string{testRecipient},
 		},
@@ -167,11 +161,9 @@ func TestAgeVaultCreation(t *testing.T) {
 func TestAgeVaultRecipientManagement(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Test keys and recipients
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
 	testRecipient1 := "age1wnhg53pg2qfsfxwvxvlg6pygw5uzwcyhj2dqhg0k83fvjexf9pzsxqdvs0"
-	testRecipient2 := "age1u7rkgxlu26y68m3ky0aesxtls9g33zy5zcy0wuehtwua6lssmpus4xszw6" // Different recipient for testing
-
+	testRecipient2 := "age1u7rkgxlu26y68m3ky0aesxtls9g33zy5zcy0wuehtwua6lssmpus4xszw6"
 	keyFile := filepath.Join(tempDir, "test-key.txt")
 	err := os.WriteFile(keyFile, []byte(testIdentity), 0600)
 	if err != nil {
@@ -267,7 +259,6 @@ func TestAgeVaultInvalidRecipient(t *testing.T) {
 	tempDir := t.TempDir()
 
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
-
 	keyFile := filepath.Join(tempDir, "test-key.txt")
 	err := os.WriteFile(keyFile, []byte(testIdentity), 0600)
 	if err != nil {
@@ -322,7 +313,6 @@ func TestAgeVaultFileFormat(t *testing.T) {
 		t.Fatalf("Failed to create vault: %v", err)
 	}
 
-	// Add some test data
 	_ = vault1.SetSecret("key1", vault.NewSecretValue([]byte("value1")))
 	_ = vault1.SetSecret("key2", vault.NewSecretValue([]byte("value2")))
 	_ = vault1.Close()
@@ -372,7 +362,6 @@ func TestAgeVaultNoRecipients(t *testing.T) {
 	tempDir := t.TempDir()
 
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
-
 	keyFile := filepath.Join(tempDir, "test-key.txt")
 	err := os.WriteFile(keyFile, []byte(testIdentity), 0600)
 	if err != nil {
@@ -387,11 +376,10 @@ func TestAgeVaultNoRecipients(t *testing.T) {
 			IdentitySources: []vault.IdentitySource{
 				{Type: "file", Path: keyFile},
 			},
-			Recipients: []string{}, // No recipients
+			Recipients: []string{},
 		},
 	}
 
-	// Should fail during vault creation due to no recipients
 	_, err = vault.NewAgeVault(config)
 	if err == nil {
 		t.Error("Expected error when creating vault with no recipients")
@@ -402,8 +390,6 @@ func TestAgeVaultPathExpansion(t *testing.T) {
 	tempDir := t.TempDir()
 
 	testIdentity := "AGE-SECRET-KEY-1LC563A3EG4TLDL5EQE0YP5ZSJW8NADURXLZ8WVM00DMKG60URRNQ5TRZH0"
-
-	// Test with relative path that needs expansion
 	relativeKeyFile := "./test-key.txt"
 
 	// Change to temp dir so relative path works
@@ -424,14 +410,13 @@ func TestAgeVaultPathExpansion(t *testing.T) {
 	}
 
 	testRecipient := "age1wnhg53pg2qfsfxwvxvlg6pygw5uzwcyhj2dqhg0k83fvjexf9pzsxqdvs0"
-
 	config := &vault.Config{
 		ID:   "path-expansion-test",
 		Type: vault.ProviderTypeAge,
 		Age: &vault.AgeConfig{
 			StoragePath: tempDir,
 			IdentitySources: []vault.IdentitySource{
-				{Type: "file", Path: relativeKeyFile}, // Use relative path
+				{Type: "file", Path: relativeKeyFile},
 			},
 			Recipients: []string{testRecipient},
 		},
@@ -443,7 +428,6 @@ func TestAgeVaultPathExpansion(t *testing.T) {
 	}
 	defer v.Close()
 
-	// Should be able to use the vault normally
 	err = v.SetSecret("test", vault.NewSecretValue([]byte("value")))
 	if err != nil {
 		t.Fatalf("Failed to set secret with relative path identity: %v", err)

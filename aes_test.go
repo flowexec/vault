@@ -50,7 +50,7 @@ func TestAESKeyResolver(t *testing.T) {
 	t.Setenv("TEST_AES_KEY", testKey)
 
 	resolver := vault.NewKeyResolver([]vault.KeySource{
-		vault.KeySource{Type: "env", Name: "TEST_AES_KEY"},
+		{Type: "env", Name: "TEST_AES_KEY"},
 	})
 
 	keys, err := resolver.ResolveKeys()
@@ -72,7 +72,7 @@ func TestAESKeyResolver(t *testing.T) {
 	}
 
 	resolver = vault.NewKeyResolver([]vault.KeySource{
-		vault.KeySource{Type: "file", Path: keyFile},
+		{Type: "file", Path: keyFile},
 	})
 
 	keys, err = resolver.ResolveKeys()
@@ -126,8 +126,8 @@ func TestAESKeyResolverDecryption(t *testing.T) {
 	t.Setenv("WORKING_KEY", workingKey)
 
 	resolver := vault.NewKeyResolver([]vault.KeySource{
-		vault.KeySource{Type: "env", Name: "WRONG_KEY"},
-		vault.KeySource{Type: "env", Name: "WORKING_KEY"},
+		{Type: "env", Name: "WRONG_KEY"},
+		{Type: "env", Name: "WORKING_KEY"},
 	})
 
 	// Test TryDecrypt - should succeed with working key
@@ -144,7 +144,7 @@ func TestAESKeyResolverDecryption(t *testing.T) {
 
 	// Test with no working keys
 	resolver = vault.NewKeyResolver([]vault.KeySource{
-		vault.KeySource{Type: "env", Name: "WRONG_KEY"},
+		{Type: "env", Name: "WRONG_KEY"},
 	})
 
 	_, _, err = resolver.TryDecrypt(encryptedData)
@@ -218,7 +218,7 @@ func TestAESVaultKeyResolution(t *testing.T) {
 		Aes: &vault.AesConfig{
 			StoragePath: tempDir,
 			KeySource: []vault.KeySource{
-				vault.KeySource{Type: "env", Name: "VAULT_KEY_1"},
+				{Type: "env", Name: "VAULT_KEY_1"},
 			},
 		},
 	}
@@ -273,7 +273,6 @@ func TestAESVaultFileFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to generate test key: %v", err)
 	}
-
 	t.Setenv("FILE_FORMAT_KEY", testKey)
 
 	config := &vault.Config{
@@ -292,12 +291,10 @@ func TestAESVaultFileFormat(t *testing.T) {
 		t.Fatalf("Failed to create vault: %v", err)
 	}
 
-	// Add some test data
 	_ = vault1.SetSecret("key1", vault.NewSecretValue([]byte("value1")))
 	_ = vault1.SetSecret("key2", vault.NewSecretValue([]byte("value2")))
 	_ = vault1.Close()
 
-	// Verify the encrypted file exists and has content
 	vaultFile := filepath.Join(tempDir, "vault-format-test.enc")
 	data, err := os.ReadFile(vaultFile)
 	if err != nil {
@@ -340,9 +337,7 @@ func TestAESDefaultKeySource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to generate test key: %v", err)
 	}
-
-	// Set the default environment variable
-	t.Setenv(vault.EncryptionKeyEnvVar, testKey)
+	t.Setenv(vault.DefaultVaultKeyEnv, testKey)
 
 	resolver := vault.NewKeyResolver(nil)
 	keys, err := resolver.ResolveKeys()

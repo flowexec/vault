@@ -13,6 +13,10 @@ type Provider interface {
 
 	// ID returns a unique identifier for this vault instance
 	ID() string
+
+	// Metadata returns vault metadata such as creation time
+	Metadata() Metadata
+
 	Close() error
 }
 
@@ -155,15 +159,12 @@ func WithAgeRecipients(recipients ...string) Option {
 		if c.Age == nil {
 			c.Age = &AgeConfig{}
 		}
-		// if len(c.Age.Recipients) == 0 {
-		// 	c.Age.Recipients = make([]string, len(recipients))
-		// }
 		c.Age.Recipients = append(c.Age.Recipients, recipients...)
 	}
 }
 
 // WithExternalConfig sets the external vault configuration. FOR TESTING PURPOSES ONLY.
-// TODO: break this down when the external provider is fully impelemented
+// TODO: break this down when the external provider is fully implemented
 func WithExternalConfig(cfg *ExternalConfig) Option {
 	return func(c *Config) {
 		c.Type = ProviderTypeExternal

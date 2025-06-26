@@ -43,6 +43,15 @@ func GenerateEncryptionKey() (string, error) {
 	return crypto.GenerateKey()
 }
 
+// DeriveEncryptionKey derives an AES encryption key from a passphrase
+func DeriveEncryptionKey(passphrase, sal string) (string, string, error) {
+	key, salt, err := crypto.DeriveKey([]byte(passphrase), []byte(sal))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to derive encryption key: %w", err)
+	}
+	return key, salt, nil
+}
+
 // ValidateEncryptionKey checks if a key is valid by attempting to encrypt/decrypt test data
 func ValidateEncryptionKey(key string) error {
 	testData := "test-validation-data"
@@ -93,7 +102,6 @@ func NewAES256Vault(cfg *Config) (*AES256Vault, error) {
 }
 
 func (v *AES256Vault) init() error {
-	// For new vaults, get the first available key
 	keys, err := v.resolver.ResolveKeys()
 	if err != nil {
 		return fmt.Errorf("no encryption key available for new vault: %w", err)
@@ -116,12 +124,12 @@ func (v *AES256Vault) init() error {
 
 // load retrieves the AESState from the vault file, decrypts it, and unmarshals it into an AESState struct.
 func (v *AES256Vault) load() error {
-	data, err := os.ReadFile(v.fullPath)
+	data, err := os.ReadFile(filepath.Clean(v.fullPath))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("failed to read vault file: %w", err)
+		return fmt.Errorf("%w: failed to read vault file %s: %w", ErrVaultNotFound, v.fullPath, err)
 	}
 
 	if len(data) == 0 {
@@ -131,7 +139,7 @@ func (v *AES256Vault) load() error {
 	// try to decrypt the vault file using available keys
 	dataStr, key, err := v.resolver.TryDecrypt(string(data))
 	if err != nil {
-		return fmt.Errorf("failed to decrypt vault - do you have the right key?: %w", err)
+		return err
 	}
 	v.dek = key
 
@@ -164,7 +172,7 @@ func (v *AES256Vault) save() error {
 	}
 
 	// write to the file atomically
-	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0750); err != nil {
 		return fmt.Errorf("failed to create vault directory: %w", err)
 	}
 	tempFile := v.fullPath + ".tmp"
@@ -173,7 +181,7 @@ func (v *AES256Vault) save() error {
 	}
 
 	if err := os.Rename(tempFile, v.fullPath); err != nil {
-		_ = os.Remove(tempFile) // Clean up on failure
+		_ = os.Remove(tempFile)
 		return fmt.Errorf("failed to move vault file: %w", err)
 	}
 
@@ -182,6 +190,16 @@ func (v *AES256Vault) save() error {
 
 func (v *AES256Vault) ID() string {
 	return v.id
+}
+
+func (v *AES256Vault) Metadata() Metadata {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if v.state == nil {
+		return Metadata{}
+	}
+	return v.state.Metadata
 }
 
 func (v *AES256Vault) GetSecret(key string) (Secret, error) {

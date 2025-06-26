@@ -77,13 +77,10 @@ func EncryptValue(encryptionKey string, text string) (string, error) {
 		return "", fmt.Errorf("plaintext too long to encrypt")
 	}
 
-	// Generate a random nonce
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("error reading random bytes: %w", err)
 	}
-
-	// Encrypt and authenticate
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 	return EncodeValue(ciphertext), nil
 }
@@ -115,10 +112,7 @@ func DecryptValue(encryptionKey string, text string) (string, error) {
 		return "", fmt.Errorf("ciphertext too short")
 	}
 
-	// Extract nonce and ciphertext
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-
-	// Decrypt and authenticate
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", fmt.Errorf("decryption failed: %w", err)

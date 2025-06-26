@@ -26,27 +26,27 @@ type Config struct {
 
 func (c *Config) Validate() error {
 	if c.ID == "" {
-		return fmt.Errorf("vault ID is required")
+		return fmt.Errorf("%w: vault ID is required", ErrInvalidConfig)
 	}
 
 	switch c.Type {
 	case ProviderTypeAge:
 		if c.Age == nil {
-			return fmt.Errorf("age configuration required for the age vault provider")
+			return fmt.Errorf("%w: age configuration required for the age vault provider", ErrInvalidConfig)
 		}
 		return c.Age.Validate()
 	case ProviderTypeAES256:
 		if c.Aes == nil {
-			return fmt.Errorf("aes configuration required for the aes256 vault provider")
+			return fmt.Errorf("%w: aes configuration required for the aes256 vault provider", ErrInvalidConfig)
 		}
 		return c.Aes.Validate()
 	case ProviderTypeExternal:
 		if c.External == nil {
-			return fmt.Errorf("external configuration required for external vault")
+			return fmt.Errorf("%w: external configuration required for external vault", ErrInvalidConfig)
 		}
 		return c.External.Validate()
 	default:
-		return fmt.Errorf("unsupported vault type: %s", c.Type)
+		return fmt.Errorf("%w: unsupported vault type: %s", ErrInvalidConfig, c.Type)
 	}
 }
 
@@ -57,11 +57,11 @@ func SaveConfigJSON(config Config, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(filepath.Clean(path), data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -70,7 +70,7 @@ func SaveConfigJSON(config Config, path string) error {
 
 // LoadConfigJSON loads the vault configuration from a file in JSON format
 func LoadConfigJSON(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return Config{}, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -108,20 +108,20 @@ type AgeConfig struct {
 
 func (c *AgeConfig) Validate() error {
 	if c.StoragePath == "" {
-		return fmt.Errorf("storage fullPath is required for local vault")
+		return fmt.Errorf("%w: storage path is required for age vault", ErrInvalidConfig)
 	}
 	if len(c.IdentitySources) == 0 {
-		return fmt.Errorf("at least one identity source is required for local vault")
+		return fmt.Errorf("%w: at least one identity source is required for age vault", ErrInvalidConfig)
 	}
 	for _, source := range c.IdentitySources {
 		if source.Type != envSource && source.Type != fileSource {
-			return fmt.Errorf("invalid identity source type: %s", source.Type)
+			return fmt.Errorf("%w: invalid identity source type: %s", ErrInvalidConfig, source.Type)
 		}
 		if source.Type == fileSource && source.Path == "" {
-			return fmt.Errorf("path is required for file identity source")
+			return fmt.Errorf("%w: path is required for file identity source", ErrInvalidConfig)
 		}
 		if source.Type == envSource && source.Name == "" {
-			return fmt.Errorf("name is required for env identity source")
+			return fmt.Errorf("%w: name is required for env identity source", ErrInvalidConfig)
 		}
 	}
 	return nil
@@ -148,20 +148,20 @@ type AesConfig struct {
 
 func (c *AesConfig) Validate() error {
 	if c.StoragePath == "" {
-		return fmt.Errorf("storage fullPath is required for local vault")
+		return fmt.Errorf("%w: storage path is required for AES vault", ErrInvalidConfig)
 	}
 	if len(c.KeySource) == 0 {
-		return fmt.Errorf("at least one key source is required for local vault")
+		return fmt.Errorf("%w: at least one key source is required for AES vault", ErrInvalidConfig)
 	}
 	for _, source := range c.KeySource {
 		if source.Type != envSource && source.Type != fileSource {
-			return fmt.Errorf("invalid key source type: %s", source.Type)
+			return fmt.Errorf("%w: invalid key source type: %s", ErrInvalidConfig, source.Type)
 		}
 		if source.Type == fileSource && source.Path == "" {
-			return fmt.Errorf("path is required for file key source")
+			return fmt.Errorf("%w: path is required for file key source", ErrInvalidConfig)
 		}
 		if source.Type == envSource && source.Name == "" {
-			return fmt.Errorf("name is required for env key source")
+			return fmt.Errorf("%w: name is required for env key source", ErrInvalidConfig)
 		}
 	}
 	return nil
@@ -193,7 +193,7 @@ type ExternalConfig struct {
 
 func (c *ExternalConfig) Validate() error {
 	if c.Commands.Get == "" || c.Commands.Set == "" {
-		return fmt.Errorf("get and set commands are required for external vault")
+		return fmt.Errorf("%w: get and set commands are required for external vault", ErrInvalidConfig)
 	}
 	return nil
 }

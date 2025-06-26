@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -34,33 +33,30 @@ func TestVaultInterface(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tempDir := t.TempDir()
 
-			vault := tt.setup(t, tempDir)
-			defer vault.Close()
+			v := tt.setup(t, tempDir)
+			defer v.Close()
 
-			testBasicOperations(t, vault)
-			testSecretOperations(t, vault)
-			testPersistence(t, vault, tt.provider, tempDir)
+			testBasicOperations(t, v)
+			testSecretOperations(t, v)
+			testPersistence(t, v, tt.provider, tempDir)
 		})
 	}
 }
 
 func setupAESVault(t *testing.T, dir string) vault.Provider {
 	// Only generate a new key if one isn't already set
-	if os.Getenv(vault.EncryptionKeyEnvVar) == "" {
+	if os.Getenv(vault.DefaultVaultKeyEnv) == "" {
 		key, err := vault.GenerateEncryptionKey()
 		if err != nil {
 			t.Fatalf("Failed to generate test key: %v", err)
 		}
-		t.Setenv(vault.EncryptionKeyEnvVar, key)
+		t.Setenv(vault.DefaultVaultKeyEnv, key)
 	}
 
-	// Use test name to ensure unique vault ID (replace problematic characters)
-	testName := strings.ReplaceAll(strings.ReplaceAll(t.Name(), "/", "-"), " ", "-")
-	vaultID := fmt.Sprintf("test-aes-%s", testName)
-	v, err := vault.New(vaultID,
+	v, err := vault.New("test-aes",
 		vault.WithProvider(vault.ProviderTypeAES256),
 		vault.WithAESPath(dir),
-		vault.WithAESKeyFromEnv(vault.EncryptionKeyEnvVar),
+		vault.WithAESKeyFromEnv(vault.DefaultVaultKeyEnv),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create AES vault: %v", err)
@@ -277,6 +273,21 @@ func testPersistence(t *testing.T, v vault.Provider, provider vault.ProviderType
 	}
 	if retrievedSecret.PlainTextString() != "persistence-test" {
 		t.Errorf("Persisted secret: expected 'persistence-test', got %q", retrievedSecret.PlainTextString())
+	}
+
+	// Test that Metadata is preserved
+	metadata := newVault.Metadata()
+	if metadata.Created.IsZero() {
+		t.Error("Metadata creation time should not be zero")
+	}
+	if metadata.LastModified.IsZero() {
+		t.Error("Metadata last modified time should not be zero")
+	}
+	if metadata.Created.After(metadata.LastModified) {
+		t.Error("Metadata creation time should not be after last modified time")
+	}
+	if metadata.LastModified.Before(metadata.Created) {
+		t.Error("Metadata last modified time should not be before creation time")
 	}
 }
 

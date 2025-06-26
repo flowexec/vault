@@ -8,10 +8,6 @@ import (
 	"github.com/jahvon/vault/crypto"
 )
 
-const (
-	EncryptionKeyEnvVar = "VAULT_ENCRYPTION_KEY"
-)
-
 type KeyResolver struct {
 	sources []KeySource
 }
@@ -19,7 +15,7 @@ type KeyResolver struct {
 func NewKeyResolver(sources []KeySource) *KeyResolver {
 	if len(sources) == 0 {
 		sources = []KeySource{
-			{Type: envSource, Name: EncryptionKeyEnvVar},
+			{Type: envSource, Name: DefaultVaultKeyEnv},
 		}
 	}
 	return &KeyResolver{
@@ -44,7 +40,7 @@ func (r *KeyResolver) ResolveKeys() ([]string, error) {
 	}
 
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("no encryption keys found")
+		return nil, fmt.Errorf("%w: no encryption keys found", ErrNoAccess)
 	}
 
 	return keys, nil
@@ -59,50 +55,17 @@ func (r *KeyResolver) TryDecrypt(encryptedData string) (string, string, error) {
 	for _, key := range keys {
 		decryptedData, err := crypto.DecryptValue(key, encryptedData)
 		if err != nil {
-			continue // Key validation failed (bad base64, etc.)
+			continue // try the next key
 		}
-
-		// For CFB mode, we need additional validation since it always "succeeds"
-		// We expect the data to be valid UTF-8 and likely YAML/JSON structure
-		if isLikelyValidDecryption(decryptedData) {
-			return decryptedData, key, nil
-		}
+		return decryptedData, key, nil
 	}
 
-	return "", "", fmt.Errorf("failed to decrypt data with any available key")
-}
-
-// isLikelyValidDecryption checks if the decrypted data looks valid
-func isLikelyValidDecryption(data string) bool {
-	// Check if it's valid UTF-8
-	if !isValidUTF8(data) {
-		return false
-	}
-
-	// Check if it contains a reasonable amount of printable characters
-	printableCount := 0
-	for _, r := range data {
-		if r >= 32 && r <= 126 || r == '\n' || r == '\t' || r == '\r' {
-			printableCount++
-		}
-	}
-
-	// If most characters are printable, it's likely valid
-	return len(data) == 0 || float64(printableCount)/float64(len(data)) > 0.8
-}
-
-func isValidUTF8(s string) bool {
-	for i, r := range s {
-		if r == '\uFFFD' && len(s[i:]) > 0 {
-			return false
-		}
-	}
-	return true
+	return "", "", fmt.Errorf("%w: failed to decrypt data with any available key", ErrDecryptionFailed)
 }
 
 func (r *KeyResolver) fromEnvironment(envVar string) string {
 	if envVar == "" {
-		envVar = EncryptionKeyEnvVar
+		envVar = DefaultVaultKeyEnv
 	}
 
 	return os.Getenv(envVar)
@@ -113,7 +76,11 @@ func (r *KeyResolver) fromFile(path string) (string, error) {
 		return "", fmt.Errorf("key file path cannot be empty")
 	}
 
-	expandedPath := expandPath(path)
+	expandedPath, err := expandPath(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to expand key file path %s: %w", path, err)
+	}
+
 	keyBytes, err := os.ReadFile(expandedPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read key file %s: %w", expandedPath, err)

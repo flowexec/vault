@@ -98,7 +98,6 @@ func (v *AgeVault) init() error {
 	}
 
 	if len(v.state.Recipients) == 0 {
-		// what to do...
 		return fmt.Errorf("no recipients available for encryption, please add at least one recipient")
 	}
 
@@ -123,7 +122,6 @@ func (v *AgeVault) load() error {
 		return nil
 	}
 
-	// decrypt the vault file using age
 	r, err := age.Decrypt(bytes.NewReader(data), v.identities...)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt vault file - do you have the right key?: %w", err)
@@ -134,7 +132,6 @@ func (v *AgeVault) load() error {
 		return fmt.Errorf("failed to unmarshal vault state: %w", err)
 	}
 
-	// store the state and recipients on the AgeVault obj
 	v.state = &state
 	if err := v.parseRecipients(); err != nil {
 		return fmt.Errorf("failed to parse recipients: %w", err)
@@ -173,7 +170,7 @@ func (v *AgeVault) save() error {
 	}
 
 	// write to the file atomically
-	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0750); err != nil {
 		return fmt.Errorf("failed to create vault directory: %w", err)
 	}
 	tempFile := v.fullPath + ".tmp"
@@ -182,7 +179,7 @@ func (v *AgeVault) save() error {
 	}
 
 	if err := os.Rename(tempFile, v.fullPath); err != nil {
-		_ = os.Remove(tempFile) // Clean up on failure
+		_ = os.Remove(tempFile)
 		return fmt.Errorf("failed to move vault file: %w", err)
 	}
 
@@ -191,6 +188,16 @@ func (v *AgeVault) save() error {
 
 func (v *AgeVault) ID() string {
 	return v.id
+}
+
+func (v *AgeVault) Metadata() Metadata {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if v.state == nil {
+		return Metadata{}
+	}
+	return v.state.Metadata
 }
 
 func (v *AgeVault) GetSecret(key string) (Secret, error) {
