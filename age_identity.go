@@ -8,10 +8,6 @@ import (
 	"filippo.io/age"
 )
 
-var (
-	DefaultVaultKeyEnv = "AGE_VAULT_KEY"
-)
-
 type IdentityResolver struct {
 	sources []IdentitySource
 }
@@ -19,7 +15,7 @@ type IdentityResolver struct {
 func NewIdentityResolver(sources []IdentitySource) *IdentityResolver {
 	if len(sources) == 0 {
 		sources = []IdentitySource{
-			{Type: "env", Name: DefaultVaultKeyEnv},
+			{Type: envSource, Name: DefaultVaultKeyEnv},
 		}
 	}
 	return &IdentityResolver{sources: sources}
@@ -30,11 +26,11 @@ func (r *IdentityResolver) ResolveIdentities() ([]age.Identity, error) {
 
 	for _, source := range r.sources {
 		switch source.Type {
-		case "env":
+		case envSource:
 			if id := r.fromEnvironment(source.Name); id != nil {
 				identities = append(identities, id)
 			}
-		case "file":
+		case fileSource:
 			if id, err := r.fromFile(source.Path); err != nil {
 				return nil, fmt.Errorf("failed to read identity from file %s: %w", source.Path, err)
 			} else if id != nil {
@@ -44,7 +40,7 @@ func (r *IdentityResolver) ResolveIdentities() ([]age.Identity, error) {
 	}
 
 	if len(identities) == 0 {
-		return nil, fmt.Errorf("no valid identities found")
+		return nil, fmt.Errorf("%w: no valid identities found", ErrNoAccess)
 	}
 
 	return identities, nil
@@ -73,7 +69,11 @@ func (r *IdentityResolver) fromFile(path string) (age.Identity, error) {
 		return nil, fmt.Errorf("identity file path cannot be empty")
 	}
 
-	expandedPath := expandPath(path)
+	expandedPath, err := expandPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand identity file path %s: %w", path, err)
+	}
+
 	keyBytes, err := os.ReadFile(expandedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read identity file %s: %w", expandedPath, err)
@@ -87,29 +87,29 @@ func (r *IdentityResolver) fromFile(path string) (age.Identity, error) {
 	return identity, nil
 }
 
-func (v *LocalVault) addRecipientToState(publicKey string) error {
+func (v *AgeVault) addRecipientToState(publicKey string) error {
 	_, err := age.ParseX25519Recipient(publicKey)
 	if err != nil {
-		return fmt.Errorf("invalid recipient key: %w", err)
+		return fmt.Errorf("%w: invalid recipient key: %w", ErrInvalidRecipient, err)
 	}
 
-	// for _, existing := range v.state.Recipients {
-	// 	if existing == publicKey {
-	// 		return fmt.Errorf("recipient already exists")
-	// 	}
-	// }
+	for _, existing := range v.state.Recipients {
+		if existing == publicKey {
+			return nil
+		}
+	}
 
 	v.state.Recipients = append(v.state.Recipients, publicKey)
 	return nil
 }
 
-func (v *LocalVault) parseRecipients() error {
+func (v *AgeVault) parseRecipients() error {
 	v.recipients = make([]age.Recipient, 0, len(v.state.Recipients))
 
 	for _, recipientStr := range v.state.Recipients {
 		recipient, err := age.ParseX25519Recipient(recipientStr)
 		if err != nil {
-			return fmt.Errorf("invalid recipient %s: %w", recipientStr, err)
+			return fmt.Errorf("%w: invalid recipient %s: %w", ErrInvalidRecipient, recipientStr, err)
 		}
 		v.recipients = append(v.recipients, recipient)
 	}

@@ -1,0 +1,13 @@
+visibility: private
+tags: [development]
+executables:
+  - verb: validate
+    description: Run the repo's pre-commit script
+    exec:
+      dir: //
+      cmd: |
+        go fmt ./...
+        go generate ./...
+        go mod tidy
+        golangci-lint run ./...
+        go test ./...
