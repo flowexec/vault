@@ -23,24 +23,26 @@ type Provider interface {
 type Option func(*Config)
 
 // New creates a new vault instance with the provided ID and options
-func New(id string, opts ...Option) (Provider, error) {
+func New(id string, opts ...Option) (Provider, *Config, error) {
 	config := &Config{ID: id}
 	for _, opt := range opts {
 		opt(config)
 	}
 	if err := config.Validate(); err != nil {
-		return nil, err
+		return nil, config, err
 	}
 
 	switch config.Type {
 	case ProviderTypeAge:
-		return NewAgeVault(config)
+		provider, err := NewAgeVault(config)
+		return provider, config, err
 	case ProviderTypeAES256:
-		return NewAES256Vault(config)
+		provider, err := NewAES256Vault(config)
+		return provider, config, err
 	case ProviderTypeExternal:
-		return nil, fmt.Errorf("external vault provider not implemented yet")
+		return nil, nil, fmt.Errorf("external vault provider not implemented yet")
 	}
-	return nil, fmt.Errorf("unsupported vault type: %s", config.Type)
+	return nil, nil, fmt.Errorf("unsupported vault type: %s", config.Type)
 }
 
 // WithProvider sets the vault provider type

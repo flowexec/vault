@@ -53,7 +53,7 @@ func setupAESVault(t *testing.T, dir string) vault.Provider {
 		t.Setenv(vault.DefaultVaultKeyEnv, key)
 	}
 
-	v, err := vault.New("test-aes",
+	v, _, err := vault.New("test-aes",
 		vault.WithProvider(vault.ProviderTypeAES256),
 		vault.WithAESPath(dir),
 		vault.WithAESKeyFromEnv(vault.DefaultVaultKeyEnv),
@@ -75,7 +75,7 @@ func setupAgeVault(t *testing.T, dir string) vault.Provider {
 		t.Fatalf("Failed to write test key file: %v", err)
 	}
 
-	v, err := vault.New("test-age",
+	v, _, err := vault.New("test-age",
 		vault.WithProvider(vault.ProviderTypeAge),
 		vault.WithAgePath(dir),
 		vault.WithAgeIdentityFromFile(keyFile),
