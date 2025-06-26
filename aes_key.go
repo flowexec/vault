@@ -3,6 +3,7 @@ package vault
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jahvon/vault/crypto"
@@ -81,7 +82,7 @@ func (r *KeyResolver) fromFile(path string) (string, error) {
 		return "", fmt.Errorf("failed to expand key file path %s: %w", path, err)
 	}
 
-	keyBytes, err := os.ReadFile(expandedPath)
+	keyBytes, err := os.ReadFile(filepath.Clean(expandedPath))
 	if err != nil {
 		return "", fmt.Errorf("failed to read key file %s: %w", expandedPath, err)
 	}
