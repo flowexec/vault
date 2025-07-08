@@ -1,4 +1,4 @@
-module github.com/jahvon/vault
+module github.com/flowexec/vault
 
 go 1.24
 

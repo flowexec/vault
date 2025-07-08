@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jahvon/vault/crypto"
+	"github.com/flowexec/vault/crypto"
 )
 
 type KeyResolver struct {

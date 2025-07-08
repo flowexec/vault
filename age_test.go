@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jahvon/vault"
+	"github.com/flowexec/vault"
 )
 
 func TestAgeIdentityResolver(t *testing.T) {

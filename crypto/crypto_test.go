@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jahvon/vault/crypto"
+	"github.com/flowexec/vault/crypto"
 )
 
 func TestGenerateKey(t *testing.T) {

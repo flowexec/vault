@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jahvon/vault"
-	"github.com/jahvon/vault/crypto"
+	"github.com/flowexec/vault"
+	"github.com/flowexec/vault/crypto"
 )
 
 func TestAESKeyGeneration(t *testing.T) {

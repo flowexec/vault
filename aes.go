@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/jahvon/vault/crypto"
+	"github.com/flowexec/vault/crypto"
 )
 
 const (

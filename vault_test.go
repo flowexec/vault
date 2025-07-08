@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jahvon/vault"
+	"github.com/flowexec/vault"
 )
 
 func TestVaultInterface(t *testing.T) {
