@@ -78,15 +78,9 @@ func WithLocalPath(path string) Option {
 		//nolint:exhaustive
 		switch c.Type {
 		case ProviderTypeAge:
-			if c.Age == nil {
-				c.Age = &AgeConfig{}
-			}
-			c.Age.StoragePath = path
+			WithAgePath(path)(c)
 		case ProviderTypeAES256:
-			if c.Aes == nil {
-				c.Aes = &AesConfig{}
-			}
-			c.Aes.StoragePath = path
+			WithAESPath(path)(c)
 		}
 	}
 }
