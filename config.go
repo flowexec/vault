@@ -14,6 +14,7 @@ const (
 	ProviderTypeAES256      ProviderType = "aes256"
 	ProviderTypeAge         ProviderType = "age"
 	ProviderTypeExternal    ProviderType = "external"
+	ProviderTypeKeyring     ProviderType = "keyring"
 	ProviderTypeUnencrypted ProviderType = "unencrypted"
 )
 
@@ -23,6 +24,7 @@ type Config struct {
 	Age         *AgeConfig         `json:"age,omitempty"`
 	Aes         *AesConfig         `json:"aes,omitempty"`
 	External    *ExternalConfig    `json:"external,omitempty"`
+	Keyring     *KeyringConfig     `json:"keyring,omitempty"`
 	Unencrypted *UnencryptedConfig `json:"unencrypted,omitempty"`
 }
 
@@ -47,6 +49,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%w: external configuration required for external vault", ErrInvalidConfig)
 		}
 		return c.External.Validate()
+	case ProviderTypeKeyring:
+		if c.Keyring == nil {
+			return fmt.Errorf("%w: keyring configuration required for keyring vault provider", ErrInvalidConfig)
+		}
+		return c.Keyring.Validate()
 	case ProviderTypeUnencrypted:
 		if c.Unencrypted == nil {
 			return fmt.Errorf("%w: unencrypted configuration required for unencrypted vault provider", ErrInvalidConfig)
@@ -214,6 +221,19 @@ type UnencryptedConfig struct {
 func (c *UnencryptedConfig) Validate() error {
 	if c.StoragePath == "" {
 		return fmt.Errorf("%w: storage path is required for unencrypted vault", ErrInvalidConfig)
+	}
+	return nil
+}
+
+// KeyringConfig contains keyring vault configuration
+type KeyringConfig struct {
+	// Service name used for keyring operations
+	Service string `json:"service"`
+}
+
+func (c *KeyringConfig) Validate() error {
+	if c.Service == "" {
+		return fmt.Errorf("%w: service name is required for keyring vault", ErrInvalidConfig)
 	}
 	return nil
 }
