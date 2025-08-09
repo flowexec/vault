@@ -11,17 +11,19 @@ import (
 type ProviderType string
 
 const (
-	ProviderTypeAES256   ProviderType = "aes256"
-	ProviderTypeAge      ProviderType = "age"
-	ProviderTypeExternal ProviderType = "external"
+	ProviderTypeAES256      ProviderType = "aes256"
+	ProviderTypeAge         ProviderType = "age"
+	ProviderTypeExternal    ProviderType = "external"
+	ProviderTypeUnencrypted ProviderType = "unencrypted"
 )
 
 type Config struct {
-	ID       string          `json:"id"`
-	Type     ProviderType    `json:"type"`
-	Age      *AgeConfig      `json:"age,omitempty"`
-	Aes      *AesConfig      `json:"aes,omitempty"`
-	External *ExternalConfig `json:"external,omitempty"`
+	ID          string             `json:"id"`
+	Type        ProviderType       `json:"type"`
+	Age         *AgeConfig         `json:"age,omitempty"`
+	Aes         *AesConfig         `json:"aes,omitempty"`
+	External    *ExternalConfig    `json:"external,omitempty"`
+	Unencrypted *UnencryptedConfig `json:"unencrypted,omitempty"`
 }
 
 func (c *Config) Validate() error {
@@ -45,6 +47,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%w: external configuration required for external vault", ErrInvalidConfig)
 		}
 		return c.External.Validate()
+	case ProviderTypeUnencrypted:
+		if c.Unencrypted == nil {
+			return fmt.Errorf("%w: unencrypted configuration required for unencrypted vault provider", ErrInvalidConfig)
+		}
+		return c.Unencrypted.Validate()
 	default:
 		return fmt.Errorf("%w: unsupported vault type: %s", ErrInvalidConfig, c.Type)
 	}
@@ -194,6 +201,19 @@ type ExternalConfig struct {
 func (c *ExternalConfig) Validate() error {
 	if c.Commands.Get == "" || c.Commands.Set == "" {
 		return fmt.Errorf("%w: get and set commands are required for external vault", ErrInvalidConfig)
+	}
+	return nil
+}
+
+// UnencryptedConfig contains unencrypted (plain text) vault configuration
+type UnencryptedConfig struct {
+	// Storage location for the vault file
+	StoragePath string `json:"storage_path"`
+}
+
+func (c *UnencryptedConfig) Validate() error {
+	if c.StoragePath == "" {
+		return fmt.Errorf("%w: storage path is required for unencrypted vault", ErrInvalidConfig)
 	}
 	return nil
 }

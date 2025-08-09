@@ -39,6 +39,9 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 	case ProviderTypeAES256:
 		provider, err := NewAES256Vault(config)
 		return provider, config, err
+	case ProviderTypeUnencrypted:
+		provider, err := NewUnencryptedVault(config)
+		return provider, config, err
 	case ProviderTypeExternal:
 		return nil, nil, fmt.Errorf("external vault provider not implemented yet")
 	}
@@ -72,7 +75,17 @@ func WithAESPath(path string) Option {
 	}
 }
 
-// WithLocalPath sets the local vault storage path (works for both Age and AES based on provider type)
+// WithUnencryptedPath sets the unencrypted vault storage path
+func WithUnencryptedPath(path string) Option {
+	return func(c *Config) {
+		if c.Unencrypted == nil {
+			c.Unencrypted = &UnencryptedConfig{}
+		}
+		c.Unencrypted.StoragePath = path
+	}
+}
+
+// WithLocalPath sets the local vault storage path (works for Age, AES, and Unencrypted based on provider type)
 func WithLocalPath(path string) Option {
 	return func(c *Config) {
 		//nolint:exhaustive
@@ -81,6 +94,8 @@ func WithLocalPath(path string) Option {
 			WithAgePath(path)(c)
 		case ProviderTypeAES256:
 			WithAESPath(path)(c)
+		case ProviderTypeUnencrypted:
+			WithUnencryptedPath(path)(c)
 		}
 	}
 }

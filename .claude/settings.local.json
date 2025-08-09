@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test:*)",
+      "Bash(go build:*)",
+      "mcp__flow__execute"
+    ],
+    "deny": []
+  }
+}
