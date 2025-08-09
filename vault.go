@@ -39,6 +39,9 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 	case ProviderTypeAES256:
 		provider, err := NewAES256Vault(config)
 		return provider, config, err
+	case ProviderTypeKeyring:
+		provider, err := NewKeyringVault(config)
+		return provider, config, err
 	case ProviderTypeUnencrypted:
 		provider, err := NewUnencryptedVault(config)
 		return provider, config, err
@@ -82,6 +85,16 @@ func WithUnencryptedPath(path string) Option {
 			c.Unencrypted = &UnencryptedConfig{}
 		}
 		c.Unencrypted.StoragePath = path
+	}
+}
+
+// WithKeyringService sets the keyring service name
+func WithKeyringService(service string) Option {
+	return func(c *Config) {
+		if c.Keyring == nil {
+			c.Keyring = &KeyringConfig{}
+		}
+		c.Keyring.Service = service
 	}
 }
 

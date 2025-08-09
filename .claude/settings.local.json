@@ -3,7 +3,8 @@
     "allow": [
       "Bash(go test:*)",
       "Bash(go build:*)",
-      "mcp__flow__execute"
+      "mcp__flow__execute",
+      "mcp__flow__list_executables"
     ],
     "deny": []
   }
