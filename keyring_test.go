@@ -4,12 +4,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
 	"github.com/flowexec/vault"
 )
 
 const testKeyringService = "flowexec-vault-test"
 
 func TestKeyringVault_New(t *testing.T) {
+	keyring.MockInit()
 	vlt, cfg, err := vault.New("test-keyring-vault",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),
@@ -37,6 +40,7 @@ func TestKeyringVault_New(t *testing.T) {
 }
 
 func TestKeyringVault_SecretOperations(t *testing.T) {
+	keyring.MockInit()
 	vlt, _, err := vault.New("test-keyring-vault",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),
@@ -45,7 +49,6 @@ func TestKeyringVault_SecretOperations(t *testing.T) {
 		t.Fatalf("Failed to create keyring vault: %v", err)
 	}
 	defer func() {
-		// Clean up any remaining secrets before closing
 		secrets, _ := vlt.ListSecrets()
 		for _, key := range secrets {
 			_ = vlt.DeleteSecret(key)
@@ -123,6 +126,7 @@ func TestKeyringVault_SecretOperations(t *testing.T) {
 }
 
 func TestKeyringVault_MultipleSecrets(t *testing.T) {
+	keyring.MockInit()
 	vlt, _, err := vault.New("test-keyring-vault-multiple",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),
@@ -205,6 +209,7 @@ func TestKeyringVault_MultipleSecrets(t *testing.T) {
 }
 
 func TestKeyringVault_Persistence(t *testing.T) {
+	keyring.MockInit()
 	testKey := "persistent-keyring-key"
 	testValue := "persistent-keyring-value"
 
@@ -258,6 +263,7 @@ func TestKeyringVault_Persistence(t *testing.T) {
 }
 
 func TestKeyringVault_Metadata(t *testing.T) {
+	keyring.MockInit()
 	vlt, _, err := vault.New("test-keyring-metadata",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),
@@ -293,6 +299,7 @@ func TestKeyringVault_Metadata(t *testing.T) {
 }
 
 func TestKeyringVault_InvalidKeyValidation(t *testing.T) {
+	keyring.MockInit()
 	vlt, _, err := vault.New("test-keyring-validation",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),
@@ -325,6 +332,7 @@ func TestKeyringVault_InvalidKeyValidation(t *testing.T) {
 }
 
 func TestKeyringVault_SortedOutput(t *testing.T) {
+	keyring.MockInit()
 	vlt, _, err := vault.New("test-keyring-sorted",
 		vault.WithProvider(vault.ProviderTypeKeyring),
 		vault.WithKeyringService(testKeyringService),

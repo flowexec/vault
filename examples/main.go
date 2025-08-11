@@ -118,7 +118,7 @@ func listProviders() {
 }
 
 func checkEnvironmentVariables(configPath string) error {
-	file, err := os.Open(configPath)
+	file, err := os.Open(filepath.Clean(configPath))
 	if err != nil {
 		return err
 	}

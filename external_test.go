@@ -9,24 +9,6 @@ import (
 	"github.com/flowexec/vault"
 )
 
-// mockCommandContext creates mock commands for testing
-func mockCommandContext(
-	outputs map[string]string,
-	errors map[string]error,
-) func(ctx context.Context, cmd, input, dir string, envList []string) (string, error) {
-	return func(ctx context.Context, cmd, input, dir string, envList []string) (string, error) {
-		for _, output := range outputs {
-			return output, nil
-		}
-
-		for range errors {
-			return "", fmt.Errorf("mock error")
-		}
-
-		return "mock", nil
-	}
-}
-
 func TestNewExternalVaultProvider(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -428,5 +410,23 @@ func TestExternalVaultProvider_Metadata(t *testing.T) {
 				t.Errorf("Metadata().RawData = %v, want %v", metadata.RawData, tt.wantRawData)
 			}
 		})
+	}
+}
+
+// mockCommandContext creates mock commands for testing
+func mockCommandContext(
+	outputs map[string]string,
+	errors map[string]error,
+) func(ctx context.Context, cmd, input, dir string, envList []string) (string, error) {
+	return func(ctx context.Context, cmd, input, dir string, envList []string) (string, error) {
+		for _, output := range outputs {
+			return output, nil
+		}
+
+		for range errors {
+			return "", fmt.Errorf("mock error")
+		}
+
+		return "mock", nil
 	}
 }
