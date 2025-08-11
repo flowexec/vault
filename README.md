@@ -5,7 +5,15 @@
     <a href="https://pkg.go.dev/github.com/flowexec/vault"><img src="https://pkg.go.dev/badge/github.com/flowexec/vault.svg" alt="Go Reference"></a>
 </p>
 
-A Go package for secure secret storage with multiple encryption backends. Made for [flow](https://github.com/jahvon/flow) but can be used independently.
+A flexible Go library for secure secret management with multiple backend providers. Made for [flow](https://github.com/jahvon/flow) but can be used independently.
+
+## Features
+
+- **Multiple Provider Support**: Choose from local encrypted storage, system keyring, or external CLI tools
+- **Pluggable Architecture**: Easy to extend with custom providers
+- **Type Safety**: Strong typing for secrets with secure memory handling
+- **Thread Safe**: Concurrent access protection with read/write mutexes
+- **Comprehensive API**: Full CRUD operations plus metadata and existence checks
 
 ## Quick Start
 
@@ -45,36 +53,125 @@ func main() {
 }
 ```
 
-## Providers
+## Provider Types
 
-### AES256 Provider
+### Local Encrypted Providers
 
-Symmetric encryption using AES-256. Best for when you want a single encryption key shared across users / systems.
+#### AES256 Provider
+Stores secrets in an AES-256 encrypted file with configurable key sources.
+
+```go
+provider, _, err := vault.New("my-vault",
+    vault.WithProvider(vault.ProviderTypeAES256),
+    vault.WithAESPath("~/secrets.vault"),
+)
+```
 
 **Key Generation:**
 ```go
 key, err := vault.GenerateEncryptionKey()
-if err != nil {
-    panic(err)
-}
-// Store this key securely and configure vault to use it
+// Store this key securely (environment variable, HSM, etc.)
 ```
 
-### Age Provider
+#### Age Provider
+Uses the [age encryption tool](https://age-encryption.org/) with public key cryptography.
 
-Asymmetric encryption using the [age encryption format](https://github.com/FiloSottile/age). Best for when you may have multiple users or need the ability to add/remove recipients.
+```go
+provider, _, err := vault.New("my-vault", 
+    vault.WithProvider(vault.ProviderTypeAge),
+    vault.WithAgePath("~/secrets.age"),
+)
+```
 
 **Key Generation:**
 ```bash
-# Generate age key pair - see https://github.com/FiloSottile/age for details
-age-keygen -o key.txt
-# Public key: age1ql3blv6a5y...
-# Private key in key.txt
+age-keygen -o ~/.age/identity.txt
+# Add recipients to vault configuration
 ```
 
-## Encrypted Files
+#### Keyring Provider
+Integrates with the operating system's secure keyring.
 
-Both vault types create a single encrypted file at the specified path:
+```go
+provider, _, err := vault.New("my-vault",
+    vault.WithProvider(vault.ProviderTypeKeyring),
+    vault.WithKeyringService("my-app-secrets"),
+)
+```
 
-- **AES256**: `vault-{id}.enc` 
-- **Age**: `vault-{id}.age`
+No additional setup required - uses OS authentication.
+
+#### Unencrypted Provider
+Stores secrets in plain text JSON files.
+
+```go
+provider, _, err := vault.New("my-vault",
+    vault.WithProvider(vault.ProviderTypeUnencrypted), 
+    vault.WithUnencryptedPath("~/dev-secrets.json"),
+)
+```
+
+### External CLI Providers
+
+#### External Provider
+Integrates with any CLI tool for secret management. Supports popular tools like Bitwarden, 1Password, HashiCorp Vault, AWS SSM, and more.
+
+```go
+config := &vault.Config{
+    ID: "bitwarden",
+    Type: vault.ProviderTypeExternal,
+    External: &vault.ExternalConfig{
+        Get: vault.CommandConfig{
+            CommandTemplate: "bw get password {{key}}",
+        },
+        Set: vault.CommandConfig{
+            CommandTemplate: "bw create item --name {{key}} --password {{value}}",
+        },
+        // ... other operations
+    },
+}
+
+provider, err := vault.NewExternalVaultProvider(config)
+```
+
+**External Provider Examples**
+
+Ready-to-use configurations for popular CLI tools are available in the [`examples/`](./examples/) directory:
+
+- **[Bitwarden](./examples/providers/bitwarden.json)**
+- **[1Password](./examples/providers/1password.json)**
+- **[AWS SSM](./examples/providers/aws-ssm.json)**
+- **[pass](./examples/providers/pass.json)**
+
+See the [examples README](./examples/README.md) for detailed setup instructions.
+
+## Usage
+
+### Basic Operations
+
+```go
+// Store a secret
+secret := vault.NewSecretValue([]byte("my-secret-value"))
+err = provider.SetSecret("api-key", secret)
+
+// Retrieve the secret
+retrieved, err := provider.GetSecret("api-key")
+fmt.Println("Secret:", retrieved.PlainTextString())
+
+// List all secrets
+secrets, _ := provider.ListSecrets()
+
+// Check if secret exists
+exists, _ := provider.HasSecret("api-key")
+
+// Get vault metadata
+metadata := provider.Metadata()
+```
+
+### Configuration from File
+
+```go
+// Load configuration from JSON
+config, err := vault.LoadConfigJSON("vault-config.json") 
+provider, _, err := vault.New(config.ID, vault.WithProvider(config.Type))
+```

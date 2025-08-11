@@ -46,7 +46,8 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 		provider, err := NewUnencryptedVault(config)
 		return provider, config, err
 	case ProviderTypeExternal:
-		return nil, nil, fmt.Errorf("external vault provider not implemented yet")
+		provider, err := NewExternalVaultProvider(config)
+		return provider, config, err
 	}
 	return nil, nil, fmt.Errorf("unsupported vault type: %s", config.Type)
 }

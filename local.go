@@ -21,6 +21,7 @@ var (
 type Metadata struct {
 	Created      time.Time `json:"created"`
 	LastModified time.Time `json:"lastModified"`
+	RawData      string    `json:"data,omitempty"`
 }
 
 // validateSecurePath checks if a path is safe to use

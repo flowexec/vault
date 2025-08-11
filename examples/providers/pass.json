@@ -1,0 +1,33 @@
+{
+  "id": "pass",
+  "type": "external",
+  "external": {
+    "get": {
+      "cmd": "pass show {{key}}",
+      "output": "{{output}}"
+    },
+    "set": {
+      "cmd": "pass insert -e {{key}}",
+      "input": "{{value}}"
+    },
+    "delete": {
+      "cmd": "pass rm -f {{key}}"
+    },
+    "list": {
+      "cmd": "pass ls",
+      "output": "{{output}}"
+    },
+    "exists": {
+      "cmd": "pass show {{key}}"
+    },
+    "metadata": {
+      "cmd": "pass git log --oneline -1",
+      "output": "Last change: {{output}}"
+    },
+    "environment": {
+      "PASSWORD_STORE_DIR": "$PASSWORD_STORE_DIR",
+      "GPG_TTY": "$(tty)"
+    },
+    "timeout": "30s"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "aws-ssm",
+  "type": "external",
+  "external": {
+    "get": {
+      "cmd": "aws ssm get-parameter --name /{{key}} --with-decryption --query Parameter.Value --output text",
+      "output": "{{output}}"
+    },
+    "set": {
+      "cmd": "aws ssm put-parameter --name /{{key}} --value {{value}} --type SecureString --overwrite"
+    },
+    "delete": {
+      "cmd": "aws ssm delete-parameter --name /{{key}}"
+    },
+    "list": {
+      "cmd": "aws ssm describe-parameters --query Parameters[].Name --output text",
+      "output": "{{output}}"
+    },
+    "listSeparator": "\t",
+    "exists": {
+      "cmd": "aws ssm get-parameter --name /{{key}}"
+    },
+    "metadata": {
+      "cmd": "aws sts get-caller-identity --output json",
+      "output": "Account: {{fromJSON(output)[\"Account\"]}}, User: {{fromJSON(output)[\"Arn\"]}}"
+    },
+    "environment": {
+      "AWS_REGION": "$AWS_REGION",
+      "AWS_ACCESS_KEY_ID": "$AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY": "$AWS_SECRET_ACCESS_KEY"
+    },
+    "timeout": "60s"
+  }
+}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 type ProviderType string
@@ -181,33 +180,45 @@ func (c *AesConfig) Validate() error {
 	return nil
 }
 
-// CommandSet defines the command templates for external vault operations
-type CommandSet struct {
-	Get    string `json:"get"`
-	Set    string `json:"set"`
-	Delete string `json:"delete"`
-	List   string `json:"list"`
-	Exists string `json:"exists,omitempty"`
+// CommandConfig represents a command template to be executed with its arguments
+type CommandConfig struct {
+	// CommandTemplate for building command arguments
+	CommandTemplate string `json:"cmd"`
+	// OutputTemplate for parsing command output
+	OutputTemplate string `json:"output,omitempty"`
+	// InputTemplate for providing input to the command
+	InputTemplate string `json:"input,omitempty"`
 }
 
 // ExternalConfig contains external (cli command-based) vault configuration
 type ExternalConfig struct {
-	// Command templates for operations
-	Commands CommandSet `json:"commands"`
+	// Get CommandConfig for the get operation
+	Get CommandConfig `json:"get,omitempty"`
+	// Set CommandConfig for the set operation
+	Set CommandConfig `json:"set,omitempty"`
+	// Delete CommandConfig for the delete operation
+	Delete CommandConfig `json:"delete,omitempty"`
+	// List CommandConfig for the list operation
+	List          CommandConfig `json:"list,omitempty"`
+	ListSeparator string        `json:"separator,omitempty"`
+	// Exists CommandConfig for the exists operation
+	Exists CommandConfig `json:"exists,omitempty"`
+	// Metadata CommandConfig for the metadata operation
+	Metadata CommandConfig `json:"metadata,omitempty"`
 
 	// Environment variables for commands
 	Environment map[string]string `json:"environment,omitempty"`
 
-	// Timeout for command execution
-	Timeout time.Duration `json:"timeout,omitempty"`
+	// Timeout duration string for command execution
+	Timeout string `json:"timeout,omitempty"`
 
 	// WorkingDir for command execution
 	WorkingDir string `json:"working_dir,omitempty"`
 }
 
 func (c *ExternalConfig) Validate() error {
-	if c.Commands.Get == "" || c.Commands.Set == "" {
-		return fmt.Errorf("%w: get and set commands are required for external vault", ErrInvalidConfig)
+	if c.Get.CommandTemplate == "" || c.Set.CommandTemplate == "" {
+		return fmt.Errorf("%w: get and set args template required for external vault", ErrInvalidConfig)
 	}
 	return nil
 }

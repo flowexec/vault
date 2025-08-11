@@ -1,0 +1,31 @@
+{
+  "id": "bitwarden",
+  "type": "external",
+  "external": {
+    "get": {
+      "cmd": "bw get password {{key}}",
+      "output": "{{output}}"
+    },
+    "set": {
+      "cmd": "if bw get item \"{{key}}\" >/dev/null 2>&1; then bw get item \"{{key}}\" | jq '.login.password=\"{{value}}\"' | bw encode | bw edit item $(bw get item \"{{key}}\" | jq -r .id); else echo '{\"object\":\"item\",\"type\":1,\"name\":\"{{key}}\",\"login\":{\"username\":\"{{key}}\",\"password\":\"{{value}}\"}}' | bw encode | bw create item; fi"
+    },
+    "delete": {
+      "cmd": "bw delete item $(bw get item {{key}} | jq -r .id)"
+    },
+    "list": {
+      "cmd": "bw list items --search \"\" --pretty",
+      "output": "{{ map(fromJSON(output), {.name}) | join(\"\\n\") }}"
+    },
+    "exists": {
+      "cmd": "bw get item {{key}}"
+    },
+    "metadata": {
+      "cmd": "bw status",
+      "output": "Status: {{output}}"
+    },
+    "environment": {
+      "BW_SESSION": "$BW_SESSION"
+    },
+    "timeout": "30s"
+  }
+}

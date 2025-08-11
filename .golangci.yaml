@@ -85,6 +85,9 @@ linters:
       - linters:
           - gocritic
         source: //noinspection
+      - linters: [gocritic]
+        text: "exitAfterDefer: (.*)"
+        path: main\.go
       - linters:
           - lll
         path: mocks\.go
