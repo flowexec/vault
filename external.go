@@ -323,7 +323,7 @@ func (v *ExternalVaultProvider) environmentToSlice() []string {
 }
 
 func (v *ExternalVaultProvider) renderCmdTemplate(template, key string) (string, error) {
-	data := expression.Data{
+	data := map[string]interface{}{
 		"env":      expandEnv(v.cfg.Environment),
 		"key":      key,
 		"ref":      key,
@@ -347,7 +347,7 @@ func (v *ExternalVaultProvider) renderCmdTemplate(template, key string) (string,
 }
 
 func (v *ExternalVaultProvider) renderCmdTemplateWithValue(template, key, value string) (string, error) {
-	data := expression.Data{
+	data := map[string]interface{}{
 		"env":      expandEnv(v.cfg.Environment),
 		"key":      key,
 		"ref":      key,
@@ -373,7 +373,7 @@ func (v *ExternalVaultProvider) renderCmdTemplateWithValue(template, key, value 
 }
 
 func (v *ExternalVaultProvider) renderInputTemplate(template, input string) (string, error) {
-	data := expression.Data{
+	data := map[string]interface{}{
 		"env":      expandEnv(v.cfg.Environment),
 		"input":    input,
 		"template": template,
@@ -394,7 +394,7 @@ func (v *ExternalVaultProvider) renderInputTemplate(template, input string) (str
 }
 
 func (v *ExternalVaultProvider) renderOutputTemplate(template, output string) (string, error) {
-	data := expression.Data{
+	data := map[string]interface{}{
 		"env":      expandEnv(v.cfg.Environment),
 		"output":   output,
 		"template": template,
