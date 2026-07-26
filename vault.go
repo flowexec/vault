@@ -14,8 +14,10 @@ type Provider interface {
 	// ID returns a unique identifier for this vault instance
 	ID() string
 
-	// Metadata returns vault metadata such as creation time
-	Metadata() Metadata
+	// Metadata returns vault metadata such as creation time. It returns an error
+	// rather than a zero value so that a failing backend command, a timeout, and
+	// "no metadata configured" stay distinguishable.
+	Metadata() (Metadata, error)
 
 	Close() error
 }

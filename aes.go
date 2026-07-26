@@ -192,14 +192,14 @@ func (v *AES256Vault) ID() string {
 	return v.id
 }
 
-func (v *AES256Vault) Metadata() Metadata {
+func (v *AES256Vault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	if v.state == nil {
-		return Metadata{}
+		return Metadata{}, ErrVaultClosed
 	}
-	return v.state.Metadata
+	return v.state.Metadata, nil
 }
 
 func (v *AES256Vault) GetSecret(key string) (Secret, error) {

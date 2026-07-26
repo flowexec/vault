@@ -91,7 +91,7 @@ func main() {
 	}
 
 	fmt.Println("Getting vault metadata...")
-	metadata := provider.Metadata()
+	metadata, _ := provider.Metadata()
 	fmt.Printf("Metadata: %s\n", metadata.RawData)
 
 	fmt.Println("Cleaning up test secret...")

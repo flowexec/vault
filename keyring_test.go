@@ -253,7 +253,7 @@ func TestKeyringVault_Persistence(t *testing.T) {
 	}
 
 	// Verify metadata is accessible
-	metadata := vault2.Metadata()
+	metadata, _ := vault2.Metadata()
 	if metadata.Created.IsZero() {
 		t.Error("Expected creation time to be set")
 	}
@@ -273,7 +273,7 @@ func TestKeyringVault_Metadata(t *testing.T) {
 	}
 	defer vlt.Close()
 
-	metadata := vlt.Metadata()
+	metadata, _ := vlt.Metadata()
 	if metadata.Created.IsZero() {
 		t.Error("Expected creation time to be set")
 	}
@@ -289,7 +289,7 @@ func TestKeyringVault_Metadata(t *testing.T) {
 		t.Fatalf("Failed to set secret: %v", err)
 	}
 
-	newMetadata := vlt.Metadata()
+	newMetadata, _ := vlt.Metadata()
 	if !newMetadata.LastModified.After(oldModified) {
 		t.Error("Expected last modified time to be updated after setting secret")
 	}

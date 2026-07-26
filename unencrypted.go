@@ -137,14 +137,14 @@ func (v *UnencryptedVault) ID() string {
 	return v.id
 }
 
-func (v *UnencryptedVault) Metadata() Metadata {
+func (v *UnencryptedVault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	if v.state == nil {
-		return Metadata{}
+		return Metadata{}, ErrVaultClosed
 	}
-	return v.state.Metadata
+	return v.state.Metadata, nil
 }
 
 func (v *UnencryptedVault) GetSecret(key string) (Secret, error) {

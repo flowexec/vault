@@ -16,23 +16,33 @@ import (
 )
 
 type ExternalVaultProvider struct {
-	ctx     context.Context
 	mu      sync.RWMutex
 	id      string
 	execute func(ctx context.Context, cmd, input, dir string, envList []string) (string, error)
+
+	ctx     context.Context
+	timeout time.Duration
+	closed  bool
 
 	cfg *ExternalConfig
 }
 
 func NewExternalVaultProvider(cfg *Config) (*ExternalVaultProvider, error) {
 	if cfg.External == nil {
-		return nil, fmt.Errorf("external configuration is required")
+		return nil, fmt.Errorf("%w: external configuration is required", ErrInvalidConfig)
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Timeout is validated by ExternalConfig.Validate, so this cannot fail here.
+	timeout, _ := cfg.External.timeoutDuration()
 
 	vault := &ExternalVaultProvider{
 		ctx:     context.Background(),
 		id:      cfg.ID,
 		cfg:     cfg.External,
+		timeout: timeout,
 		execute: execute,
 	}
 
@@ -43,16 +53,41 @@ func (v *ExternalVaultProvider) ID() string {
 	return v.id
 }
 
+// SetContext replaces the context used for command execution, allowing callers to
+// cancel in-flight operations. The Provider interface does not thread a context
+// through its methods, so this is the supported way to make external commands
+// cancellable.
+func (v *ExternalVaultProvider) SetContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.ctx = ctx
+}
+
 func (v *ExternalVaultProvider) GetSecret(key string) (Secret, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	return v.getSecretLocked(key)
+}
+
+// getSecretLocked implements GetSecret and assumes the caller already holds at
+// least a read lock. HasSecret needs to delegate here rather than to GetSecret:
+// sync.RWMutex does not support recursive read locking, so a writer arriving
+// between the two RLock calls would deadlock both.
+func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 	if err := ValidateSecretKey(key); err != nil {
 		return nil, err
 	}
 
+	if v.closed {
+		return nil, ErrVaultClosed
+	}
+
 	if v.cfg.Get.CommandTemplate == "" {
-		return nil, fmt.Errorf("get operation not configured")
+		return nil, fmt.Errorf("%w: get operation not configured", ErrInvalidConfig)
 	}
 
 	cmd, err := v.renderCmdTemplate(v.cfg.Get.CommandTemplate, key)
@@ -94,26 +129,38 @@ func (v *ExternalVaultProvider) SetSecret(key string, value Secret) error {
 		return err
 	}
 
-	if v.cfg.Set.CommandTemplate == "" {
-		return fmt.Errorf("set operation not configured")
+	if v.closed {
+		return ErrVaultClosed
 	}
 
-	cmd, err := v.renderCmdTemplateWithValue(v.cfg.Set.CommandTemplate, key, value.PlainTextString())
+	if v.cfg.Set.CommandTemplate == "" {
+		return fmt.Errorf("%w: set operation not configured", ErrInvalidConfig)
+	}
+
+	// The secret value is deliberately not available to the command template. The
+	// rendered command is parsed and run by a shell, and the template engine does
+	// no quoting, so interpolating a secret there is a command-injection sink and
+	// silently corrupts any value containing shell metacharacters. Values travel
+	// over stdin via the set input template instead. ExternalConfig.Validate
+	// rejects configs that still reference {{ value }} in the set command.
+	cmd, err := v.renderCmdTemplate(v.cfg.Set.CommandTemplate, key)
 	if err != nil {
 		return fmt.Errorf("failed to render set cmd: %w", err)
 	}
 
 	var input string
 	if v.cfg.Set.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Get.InputTemplate, key)
+		input, err = v.renderInputTemplateWithValue(v.cfg.Set.InputTemplate, key, value.PlainTextString())
 		if err != nil {
 			return fmt.Errorf("failed to render input template: %w", err)
 		}
 	}
 
-	out, err := v.executeCommand(cmd, input)
-	if err != nil {
-		return fmt.Errorf("failed to set secret: %w stdErr: %s", err, out)
+	// The error from executeCommand already carries stderr. Do not add the command
+	// output here: a backend that echoes the failing command back would put the
+	// secret value into the returned error string.
+	if _, err := v.executeCommand(cmd, input); err != nil {
+		return fmt.Errorf("failed to set secret: %w", err)
 	}
 
 	return nil
@@ -127,8 +174,12 @@ func (v *ExternalVaultProvider) DeleteSecret(key string) error {
 		return err
 	}
 
+	if v.closed {
+		return ErrVaultClosed
+	}
+
 	if v.cfg.Delete.CommandTemplate == "" {
-		return fmt.Errorf("delete operation not configured")
+		return fmt.Errorf("%w: delete operation not configured", ErrInvalidConfig)
 	}
 
 	cmd, err := v.renderCmdTemplate(v.cfg.Delete.CommandTemplate, key)
@@ -138,7 +189,7 @@ func (v *ExternalVaultProvider) DeleteSecret(key string) error {
 
 	var input string
 	if v.cfg.Delete.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Get.InputTemplate, key)
+		input, err = v.renderInputTemplate(v.cfg.Delete.InputTemplate, key)
 		if err != nil {
 			return fmt.Errorf("failed to render input template: %w", err)
 		}
@@ -155,8 +206,12 @@ func (v *ExternalVaultProvider) ListSecrets() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if v.closed {
+		return nil, ErrVaultClosed
+	}
+
 	if v.cfg.List.CommandTemplate == "" {
-		return nil, fmt.Errorf("list operation not configured")
+		return nil, fmt.Errorf("%w: list operation not configured", ErrInvalidConfig)
 	}
 
 	cmd, err := v.renderCmdTemplate(v.cfg.List.CommandTemplate, "")
@@ -166,7 +221,7 @@ func (v *ExternalVaultProvider) ListSecrets() ([]string, error) {
 
 	var input string
 	if v.cfg.List.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Get.InputTemplate, "")
+		input, err = v.renderInputTemplate(v.cfg.List.InputTemplate, "")
 		if err != nil {
 			return nil, fmt.Errorf("failed to render input template: %w", err)
 		}
@@ -196,7 +251,7 @@ func (v *ExternalVaultProvider) ListSecrets() ([]string, error) {
 		sep = "\n"
 	}
 	secrets := strings.Split(secretsList, sep)
-	var result []string
+	result := make([]string, 0, len(secrets))
 	for _, secret := range secrets {
 		secret = strings.TrimSpace(secret)
 		if secret != "" {
@@ -215,30 +270,16 @@ func (v *ExternalVaultProvider) HasSecret(key string) (bool, error) {
 		return false, err
 	}
 
-	if v.cfg.Exists.CommandTemplate != "" {
-		cmd, err := v.renderCmdTemplate(v.cfg.Exists.CommandTemplate, key)
-		if err != nil {
-			return false, fmt.Errorf("failed to render exists cmd: %w", err)
-		}
-
-		var input string
-		if v.cfg.Exists.InputTemplate != "" {
-			input, err = v.renderInputTemplate(v.cfg.Exists.InputTemplate, key)
-			if err != nil {
-				return false, fmt.Errorf("failed to render input template: %w", err)
-			}
-		}
-
-		_, err = v.executeCommand(cmd, input)
-		// typically, exists commands return non-zero exit code if secret doesn't exist
-		return err == nil, nil
+	if v.closed {
+		return false, ErrVaultClosed
 	}
 
-	_, err := v.GetSecret(key)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") ||
-			strings.Contains(err.Error(), "not exist") ||
-			strings.Contains(err.Error(), "not in") {
+	if v.cfg.Exists.CommandTemplate != "" {
+		return v.hasSecretViaExistsCmd(key)
+	}
+
+	if _, err := v.getSecretLocked(key); err != nil {
+		if v.isNotFoundErr(err) {
 			return false, nil
 		}
 		return false, err
@@ -246,63 +287,110 @@ func (v *ExternalVaultProvider) HasSecret(key string) (bool, error) {
 	return true, nil
 }
 
+func (v *ExternalVaultProvider) hasSecretViaExistsCmd(key string) (bool, error) {
+	cmd, err := v.renderCmdTemplate(v.cfg.Exists.CommandTemplate, key)
+	if err != nil {
+		return false, fmt.Errorf("failed to render exists cmd: %w", err)
+	}
+
+	var input string
+	if v.cfg.Exists.InputTemplate != "" {
+		input, err = v.renderInputTemplate(v.cfg.Exists.InputTemplate, key)
+		if err != nil {
+			return false, fmt.Errorf("failed to render input template: %w", err)
+		}
+	}
+
+	if _, err = v.executeCommand(cmd, input); err == nil {
+		return true, nil
+	}
+
+	// A non-zero exit conventionally means "absent", but it is also how an expired
+	// session, a network failure, or a permissions problem surfaces. NotFoundPattern
+	// lets a config say which failures actually mean absence.
+	if v.cfg.NotFoundPattern != "" && !strings.Contains(err.Error(), v.cfg.NotFoundPattern) {
+		return false, err
+	}
+	return false, nil
+}
+
+func (v *ExternalVaultProvider) isNotFoundErr(err error) bool {
+	if v.cfg.NotFoundPattern != "" {
+		return strings.Contains(err.Error(), v.cfg.NotFoundPattern)
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not exist") ||
+		strings.Contains(msg, "not in")
+}
+
 func (v *ExternalVaultProvider) Close() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	v.closed = true
 	return nil
 }
 
 func (v *ExternalVaultProvider) SetExecutionFunc(
 	fn func(ctx context.Context, cmd, input, dir string, envList []string) (string, error),
 ) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.execute = fn
 }
 
-func (v *ExternalVaultProvider) Metadata() Metadata {
+func (v *ExternalVaultProvider) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if v.closed {
+		return Metadata{}, ErrVaultClosed
+	}
+
 	if v.cfg.Metadata.CommandTemplate == "" {
-		return Metadata{}
+		return Metadata{}, nil
 	}
 
 	cmd, err := v.renderCmdTemplate(v.cfg.Metadata.CommandTemplate, "")
 	if err != nil {
-		return Metadata{}
+		return Metadata{}, fmt.Errorf("failed to render metadata cmd: %w", err)
 	}
+
 	var input string
-	if v.cfg.List.InputTemplate != "" {
+	if v.cfg.Metadata.InputTemplate != "" {
 		input, err = v.renderInputTemplate(v.cfg.Metadata.InputTemplate, "")
 		if err != nil {
-			return Metadata{}
+			return Metadata{}, fmt.Errorf("failed to render input template: %w", err)
 		}
 	}
 
 	output, err := v.executeCommand(cmd, input)
 	if err != nil {
-		return Metadata{}
+		return Metadata{}, fmt.Errorf("failed to read metadata: %w", err)
 	}
 
 	var metadataOutput string
 	if v.cfg.Metadata.OutputTemplate != "" {
 		metadataOutput, err = v.renderOutputTemplate(v.cfg.Metadata.OutputTemplate, output)
 		if err != nil {
-			return Metadata{}
+			return Metadata{}, fmt.Errorf("failed to parse metadata output: %w", err)
 		}
 	} else {
 		metadataOutput = strings.TrimSpace(output)
 	}
 
-	return Metadata{RawData: metadataOutput}
+	return Metadata{RawData: metadataOutput}, nil
 }
 
 func (v *ExternalVaultProvider) executeCommand(cmd, input string) (string, error) {
 	ctx := v.ctx
-	if v.cfg.Timeout != "" {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if v.timeout > 0 {
 		var cancel context.CancelFunc
-		dur, parseErr := time.ParseDuration(v.cfg.Timeout)
-		if parseErr != nil {
-			return "", fmt.Errorf("invalid timeout duration: %w", parseErr)
-		}
-		ctx, cancel = context.WithTimeout(v.ctx, dur)
+		ctx, cancel = context.WithTimeout(ctx, v.timeout)
 		defer cancel()
 	}
 
@@ -315,103 +403,71 @@ func (v *ExternalVaultProvider) executeCommand(cmd, input string) (string, error
 }
 
 func (v *ExternalVaultProvider) environmentToSlice() []string {
-	var envSlice []string
-	for key, value := range expandEnv(v.cfg.Environment) {
+	expanded := expandEnv(v.cfg.Environment)
+	envSlice := make([]string, 0, len(expanded))
+	for key, value := range expanded {
 		envSlice = append(envSlice, fmt.Sprintf("%s=%s", key, value))
 	}
 	return envSlice
 }
 
-func (v *ExternalVaultProvider) renderCmdTemplate(template, key string) (string, error) {
-	data := map[string]interface{}{
-		"env":      expandEnv(v.cfg.Environment),
-		"key":      key,
-		"ref":      key,
-		"id":       key,
-		"name":     key,
-		"template": template,
+// templateData is the variable set shared by the command and input templates.
+// The secret value is intentionally absent; only renderInputTemplateWithValue
+// adds it.
+func (v *ExternalVaultProvider) templateData(key string) map[string]interface{} {
+	return map[string]interface{}{
+		"env":  expandEnv(v.cfg.Environment),
+		"key":  key,
+		"ref":  key,
+		"id":   key,
+		"name": key,
 	}
+}
 
-	template = os.ExpandEnv(template)
-	tmpl := expression.NewTemplate(fmt.Sprintf("%s-args-template", v.id), data)
-	err := tmpl.Parse(template)
-	if err != nil {
-		return "", fmt.Errorf("parsing args template: %w", err)
+func (v *ExternalVaultProvider) render(name, template string, data map[string]interface{}) (string, error) {
+	// os.ExpandEnv is deliberately not applied here. It runs before the shell
+	// parses the command, so it destroys $VAR, ${VAR}, $1, $? and $@, makes a
+	// literal $ unwritable, and applies substitution before quoting -- the wrong
+	// order for injection safety. execute() already appends the configured
+	// environment to os.Environ(), so the interpreter resolves $VAR itself, with
+	// correct quoting semantics and with cfg.Environment actually in scope.
+	tmpl := expression.NewTemplate(fmt.Sprintf("%s-%s-template", v.id, name), data)
+	if err := tmpl.Parse(template); err != nil {
+		return "", fmt.Errorf("parsing %s template: %w", name, err)
 	}
 
 	result, err := tmpl.ExecuteToString()
 	if err != nil {
-		return "", fmt.Errorf("evaluating args template: %w", err)
+		return "", fmt.Errorf("evaluating %s template: %w", name, err)
 	}
 	return result, nil
 }
 
-func (v *ExternalVaultProvider) renderCmdTemplateWithValue(template, key, value string) (string, error) {
-	data := map[string]interface{}{
-		"env":      expandEnv(v.cfg.Environment),
-		"key":      key,
-		"ref":      key,
-		"id":       key,
-		"name":     key,
-		"value":    value,
-		"password": value,
-		"template": template,
-	}
-
-	template = os.ExpandEnv(template)
-	tmpl := expression.NewTemplate(fmt.Sprintf("%s-args-template", v.id), data)
-	err := tmpl.Parse(template)
-	if err != nil {
-		return "", fmt.Errorf("parsing args template: %w", err)
-	}
-
-	result, err := tmpl.ExecuteToString()
-	if err != nil {
-		return "", fmt.Errorf("evaluating args template: %w", err)
-	}
-	return result, nil
+func (v *ExternalVaultProvider) renderCmdTemplate(template, key string) (string, error) {
+	return v.render("args", template, v.templateData(key))
 }
 
 func (v *ExternalVaultProvider) renderInputTemplate(template, input string) (string, error) {
-	data := map[string]interface{}{
-		"env":      expandEnv(v.cfg.Environment),
-		"input":    input,
-		"template": template,
-	}
+	return v.renderInputTemplateWithValue(template, input, "")
+}
 
-	template = os.ExpandEnv(template)
-	tmpl := expression.NewTemplate(fmt.Sprintf("%s-input-template", v.id), data)
-	err := tmpl.Parse(template)
-	if err != nil {
-		return "", fmt.Errorf("parsing input template: %w", err)
-	}
-
-	result, err := tmpl.ExecuteToString()
-	if err != nil {
-		return "", fmt.Errorf("evaluating input template: %w", err)
-	}
-	return result, nil
+func (v *ExternalVaultProvider) renderInputTemplateWithValue(template, input, value string) (string, error) {
+	data := v.templateData(input)
+	data["input"] = input
+	data["value"] = value
+	data["password"] = value
+	return v.render("input", template, data)
 }
 
 func (v *ExternalVaultProvider) renderOutputTemplate(template, output string) (string, error) {
 	data := map[string]interface{}{
-		"env":      expandEnv(v.cfg.Environment),
-		"output":   output,
-		"template": template,
+		"env":    expandEnv(v.cfg.Environment),
+		"output": output,
 	}
 
-	template = os.ExpandEnv(template)
-	tmpl := expression.NewTemplate(fmt.Sprintf("%s-output-template", v.id), data)
-	err := tmpl.Parse(template)
-	if err != nil {
-		return "", fmt.Errorf("parsing output template: %w", err)
-	}
-
-	result, err := tmpl.ExecuteToString()
-	if err != nil {
-		return "", fmt.Errorf("evaluating output template: %w", err)
-	}
-	return result, nil
+	// Unlike command templates, output templates are never handed to a shell, so
+	// environment expansion here is safe and preserved for compatibility.
+	return v.render("output", os.ExpandEnv(template), data)
 }
 
 func execute(ctx context.Context, cmd, input, dir string, envList []string) (string, error) {
@@ -455,18 +511,25 @@ func execute(ctx context.Context, cmd, input, dir string, envList []string) (str
 		}
 		return stdErrBuffer.String(), fmt.Errorf("encountered an error executing command - %w", err)
 	}
-	output := stdOutBuffer.String()
-	if stderr := stdErrBuffer.String(); stderr != "" {
-		output += "\n" + stderr
-	}
-	return strings.TrimSpace(output), nil
+
+	// Only stdout is the result. Merging stderr in on success concatenates any
+	// warning the backend emits (e.g. "gpg: WARNING: unsafe permissions") onto
+	// the secret value itself. stderr is still returned on the error path above.
+	return strings.TrimSpace(stdOutBuffer.String()), nil
 }
 
+// expandEnv returns a new map with environment references expanded. It must not
+// mutate the input: the caller's map is the shared provider config, and the read
+// paths (GetSecret, ListSecrets, HasSecret, Metadata) hold only a read lock, so
+// writing to it concurrently is an unrecoverable "concurrent map writes" fault.
 func expandEnv(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env))
 	for k, v := range env {
 		if strings.Contains(v, "$") || strings.Contains(v, "{") {
-			env[k] = os.ExpandEnv(v)
+			out[k] = os.ExpandEnv(v)
+		} else {
+			out[k] = v
 		}
 	}
-	return env
+	return out
 }

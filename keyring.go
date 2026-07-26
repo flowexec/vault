@@ -154,11 +154,11 @@ func (v *KeyringVault) ID() string {
 	return v.id
 }
 
-func (v *KeyringVault) Metadata() Metadata {
+func (v *KeyringVault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	return v.metadata
+	return v.metadata, nil
 }
 
 func (v *KeyringVault) GetSecret(key string) (Secret, error) {

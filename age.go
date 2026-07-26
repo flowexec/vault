@@ -190,14 +190,14 @@ func (v *AgeVault) ID() string {
 	return v.id
 }
 
-func (v *AgeVault) Metadata() Metadata {
+func (v *AgeVault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	if v.state == nil {
-		return Metadata{}
+		return Metadata{}, ErrVaultClosed
 	}
-	return v.state.Metadata
+	return v.state.Metadata, nil
 }
 
 func (v *AgeVault) GetSecret(key string) (Secret, error) {
