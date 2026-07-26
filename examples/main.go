@@ -30,7 +30,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	configPath := os.Args[1]
+	configPath := filepath.Clean(os.Args[1])
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		fmt.Printf("Error: Configuration file '%s' not found\n", configPath)
 		os.Exit(1)

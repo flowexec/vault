@@ -166,7 +166,7 @@ func WithAgeIdentityFromEnv(envVar string) Option {
 		}
 		c.Age.IdentitySources = append(
 			c.Age.IdentitySources,
-			IdentitySource{Type: "env", Name: envVar},
+			IdentitySource{Type: envSource, Name: envVar},
 		)
 	}
 }
@@ -198,7 +198,7 @@ func WithAESKeyFromEnv(envVar string) Option {
 		}
 		c.Aes.KeySource = append(
 			c.Aes.KeySource,
-			KeySource{Type: "env", Name: envVar},
+			KeySource{Type: envSource, Name: envVar},
 		)
 	}
 }
