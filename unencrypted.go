@@ -2,9 +2,7 @@ package vault
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -74,20 +72,16 @@ func (v *UnencryptedVault) init() error {
 		Secrets: make(map[string]string),
 	}
 
-	return v.save()
+	return withVaultLock(v.fullPath, v.save)
 }
 
 // load retrieves the vault contents from the file and parses it into the state.
 func (v *UnencryptedVault) load() error {
-	data, err := os.ReadFile(filepath.Clean(v.fullPath))
+	data, exists, err := readVaultFile(v.fullPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("%w: failed to read vault file %s: %w", ErrVaultNotFound, v.fullPath, err)
+		return err
 	}
-
-	if len(data) == 0 {
+	if !exists {
 		return nil
 	}
 
@@ -104,7 +98,7 @@ func (v *UnencryptedVault) load() error {
 // save writes the vault contents to disk in JSON format
 func (v *UnencryptedVault) save() error {
 	if v.state == nil {
-		return nil
+		return ErrVaultClosed
 	}
 
 	v.state.LastModified = time.Now()
@@ -115,22 +109,21 @@ func (v *UnencryptedVault) save() error {
 		return fmt.Errorf("failed to marshal vault state: %w", err)
 	}
 
-	// Write to file atomically
-	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0750); err != nil {
-		return fmt.Errorf("failed to create vault directory: %w", err)
-	}
+	return writeVaultFileAtomic(v.fullPath, data)
+}
 
-	tempFile := v.fullPath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp vault file: %w", err)
-	}
-
-	if err := os.Rename(tempFile, v.fullPath); err != nil {
-		_ = os.Remove(tempFile)
-		return fmt.Errorf("failed to move vault file: %w", err)
-	}
-
-	return nil
+// mutate runs a read-modify-write cycle under the cross-process vault lock.
+// See AES256Vault.mutate for why the reload inside the lock is required.
+func (v *UnencryptedVault) mutate(apply func() error) error {
+	return withVaultLock(v.fullPath, func() error {
+		if err := v.load(); err != nil {
+			return err
+		}
+		if err := apply(); err != nil {
+			return err
+		}
+		return v.save()
+	})
 }
 
 func (v *UnencryptedVault) ID() string {
@@ -151,6 +144,13 @@ func (v *UnencryptedVault) GetSecret(key string) (Secret, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if err := ValidateSecretKey(key); err != nil {
+		return nil, err
+	}
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
+
 	value, exists := v.state.Secrets[key]
 	if !exists {
 		return nil, ErrSecretNotFound
@@ -166,31 +166,48 @@ func (v *UnencryptedVault) SetSecret(key string, secret Secret) error {
 	if err := ValidateSecretKey(key); err != nil {
 		return err
 	}
-
-	if v.state.Secrets == nil {
-		v.state.Secrets = make(map[string]string)
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	v.state.Secrets[key] = secret.PlainTextString()
-	return v.save()
+	return v.mutate(func() error {
+		if v.state.Secrets == nil {
+			v.state.Secrets = make(map[string]string)
+		}
+		v.state.Secrets[key] = secret.PlainTextString()
+		return nil
+	})
 }
 
 func (v *UnencryptedVault) DeleteSecret(key string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	_, exists := v.state.Secrets[key]
-	if !exists {
-		return ErrSecretNotFound
+	if err := ValidateSecretKey(key); err != nil {
+		return err
+	}
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	delete(v.state.Secrets, key)
-	return v.save()
+	// The existence check runs inside mutate, after the reload, so it sees the
+	// current on-disk contents rather than a stale snapshot.
+	return v.mutate(func() error {
+		if _, exists := v.state.Secrets[key]; !exists {
+			return ErrSecretNotFound
+		}
+		delete(v.state.Secrets, key)
+		return nil
+	})
 }
 
 func (v *UnencryptedVault) ListSecrets() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
 
 	keys := make([]string, 0, len(v.state.Secrets))
 	for k := range v.state.Secrets {
@@ -205,6 +222,13 @@ func (v *UnencryptedVault) ListSecrets() ([]string, error) {
 func (v *UnencryptedVault) HasSecret(key string) (bool, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if err := ValidateSecretKey(key); err != nil {
+		return false, err
+	}
+	if v.state == nil {
+		return false, ErrVaultClosed
+	}
 
 	_, exists := v.state.Secrets[key]
 	return exists, nil
