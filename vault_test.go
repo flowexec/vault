@@ -276,7 +276,7 @@ func testPersistence(t *testing.T, v vault.Provider, provider vault.ProviderType
 	}
 
 	// Test that Metadata is preserved
-	metadata := newVault.Metadata()
+	metadata, _ := newVault.Metadata()
 	if metadata.Created.IsZero() {
 		t.Error("Metadata creation time should not be zero")
 	}

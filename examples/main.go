@@ -11,6 +11,16 @@ import (
 	"github.com/flowexec/vault"
 )
 
+func printMetadata(provider vault.Provider) {
+	fmt.Println("Getting vault metadata...")
+	metadata, err := provider.Metadata()
+	if err != nil {
+		fmt.Printf("Warning: could not read metadata: %v\n", err)
+		return
+	}
+	fmt.Printf("Metadata: %s\n", metadata.RawData)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: go run main.go <provider-config.json>")
@@ -90,9 +100,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Getting vault metadata...")
-	metadata := provider.Metadata()
-	fmt.Printf("Metadata: %s\n", metadata.RawData)
+	printMetadata(provider)
 
 	fmt.Println("Cleaning up test secret...")
 	err = provider.DeleteSecret("test-key")

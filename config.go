@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"time"
 )
 
 type ProviderType string
@@ -25,11 +27,17 @@ type Config struct {
 	External    *ExternalConfig    `json:"external,omitempty"`
 	Keyring     *KeyringConfig     `json:"keyring,omitempty"`
 	Unencrypted *UnencryptedConfig `json:"unencrypted,omitempty"`
+
+	// pendingLocalPath holds a WithLocalPath value until the provider type is
+	// known. Unexported so it never reaches the serialized config.
+	pendingLocalPath string
 }
 
 func (c *Config) Validate() error {
-	if c.ID == "" {
-		return fmt.Errorf("%w: vault ID is required", ErrInvalidConfig)
+	// The ID becomes part of a filename and of keyring entry names, so it needs
+	// a real charset check, not just a non-empty check.
+	if err := ValidateVaultID(c.ID); err != nil {
+		return err
 	}
 
 	switch c.Type {
@@ -214,12 +222,57 @@ type ExternalConfig struct {
 
 	// WorkingDir for command execution
 	WorkingDir string `json:"working_dir,omitempty"`
+
+	// NotFoundPattern is matched against a failing command's error output to tell
+	// "this secret does not exist" apart from a real failure (an expired session,
+	// a network error, a permissions problem). Without it, any non-zero exit is
+	// read as absence. Example: "ParameterNotFound".
+	NotFoundPattern string `json:"not_found_pattern,omitempty"`
 }
+
+// timeoutDuration parses the configured timeout. An empty timeout means no limit.
+func (c *ExternalConfig) timeoutDuration() (time.Duration, error) {
+	if c.Timeout == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(c.Timeout)
+}
+
+// secretValueRefs matches a template action referencing the secret value. These
+// are rejected in command templates: the rendered command is executed by a shell
+// and the template engine performs no quoting, so interpolating a secret there is
+// a command-injection sink and silently corrupts values containing shell
+// metacharacters. Secrets must travel over stdin via an input template.
+var secretValueRefs = regexp.MustCompile(`{{[^}]*\b(value|password)\b[^}]*}}`)
 
 func (c *ExternalConfig) Validate() error {
 	if c.Get.CommandTemplate == "" || c.Set.CommandTemplate == "" {
 		return fmt.Errorf("%w: get and set args template required for external vault", ErrInvalidConfig)
 	}
+
+	cmdTemplates := map[string]string{
+		"get":      c.Get.CommandTemplate,
+		"set":      c.Set.CommandTemplate,
+		"delete":   c.Delete.CommandTemplate,
+		"list":     c.List.CommandTemplate,
+		"exists":   c.Exists.CommandTemplate,
+		"metadata": c.Metadata.CommandTemplate,
+	}
+	for op, tmpl := range cmdTemplates {
+		if secretValueRefs.MatchString(tmpl) {
+			return fmt.Errorf(
+				"%w: the %s command template references the secret value, which is unsafe: "+
+					"the command is run by a shell and the value is not quoted. "+
+					`Move it to an input template instead, e.g. "input": "{{ value }}"`,
+				ErrInvalidConfig, op,
+			)
+		}
+	}
+
+	if _, err := c.timeoutDuration(); err != nil {
+		return fmt.Errorf("%w: invalid timeout duration %q: %w", ErrInvalidConfig, c.Timeout, err)
+	}
+
 	return nil
 }
 

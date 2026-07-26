@@ -1,10 +1,8 @@
 package vault
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,7 +20,10 @@ const (
 type AESState struct {
 	Metadata `yaml:"metadata"`
 
-	Version int               `json:"version"`
+	// yaml, not json: this struct is marshaled with gopkg.in/yaml.v3, which
+	// ignores json tags and would otherwise have keyed this field as "version"
+	// only by lowercasing coincidence.
+	Version int               `yaml:"version"`
 	ID      string            `yaml:"id"`
 	Secrets map[string]string `yaml:"secrets"`
 }
@@ -43,13 +44,22 @@ func GenerateEncryptionKey() (string, error) {
 	return crypto.GenerateKey()
 }
 
-// DeriveEncryptionKey derives an AES encryption key from a passphrase
+// DeriveEncryptionKey derives an AES encryption key from a passphrase.
+//
+// An empty sal requests a freshly generated salt. Pass the returned salt back
+// verbatim to re-derive the same key; it carries the parameters it was made
+// with, so future changes to the defaults cannot alter an existing key.
 func DeriveEncryptionKey(passphrase, sal string) (string, string, error) {
-	key, salt, err := crypto.DeriveKey([]byte(passphrase), []byte(sal))
+	var salt []byte
+	if sal != "" {
+		salt = []byte(sal)
+	}
+
+	key, salt2, err := crypto.DeriveKey([]byte(passphrase), salt)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to derive encryption key: %w", err)
 	}
-	return key, salt, nil
+	return key, salt2, nil
 }
 
 // ValidateEncryptionKey checks if a key is valid by attempting to encrypt/decrypt test data
@@ -77,10 +87,14 @@ func NewAES256Vault(cfg *Config) (*AES256Vault, error) {
 		return nil, fmt.Errorf("AES configuration is required")
 	}
 
-	path := filepath.Join(
-		filepath.Clean(cfg.Aes.StoragePath),
-		filepath.Clean(fmt.Sprintf("%s-%s.%s", vaultFileBase, cfg.ID, aesVaultFileExt)),
-	)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	path, err := resolveVaultPath(cfg.Aes.StoragePath, cfg.ID, aesVaultFileExt)
+	if err != nil {
+		return nil, err
+	}
 
 	vault := &AES256Vault{
 		id:       cfg.ID,
@@ -119,20 +133,16 @@ func (v *AES256Vault) init() error {
 		Secrets: make(map[string]string),
 	}
 
-	return v.save()
+	return withVaultLock(v.fullPath, v.save)
 }
 
 // load retrieves the AESState from the vault file, decrypts it, and unmarshals it into an AESState struct.
 func (v *AES256Vault) load() error {
-	data, err := os.ReadFile(filepath.Clean(v.fullPath))
+	data, exists, err := readVaultFile(v.fullPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("%w: failed to read vault file %s: %w", ErrVaultNotFound, v.fullPath, err)
+		return err
 	}
-
-	if len(data) == 0 {
+	if !exists {
 		return nil
 	}
 
@@ -147,6 +157,10 @@ func (v *AES256Vault) load() error {
 	if err := yaml.Unmarshal([]byte(dataStr), &state); err != nil {
 		return fmt.Errorf("failed to unmarshal vault state: %w", err)
 	}
+	if err := checkVaultVersion(state.Version, aesCurrentVaultVersion, v.fullPath); err != nil {
+		return err
+	}
+
 	v.state = &state
 	return nil
 }
@@ -154,7 +168,7 @@ func (v *AES256Vault) load() error {
 // save encrypts and writes the vault contents to disk
 func (v *AES256Vault) save() error {
 	if v.state == nil {
-		return nil
+		return ErrVaultClosed
 	}
 
 	if v.dek == "" {
@@ -171,40 +185,51 @@ func (v *AES256Vault) save() error {
 		return fmt.Errorf("failed to encrypt vault state: %w", err)
 	}
 
-	// write to the file atomically
-	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0750); err != nil {
-		return fmt.Errorf("failed to create vault directory: %w", err)
-	}
-	tempFile := v.fullPath + ".tmp"
-	if err := os.WriteFile(tempFile, []byte(encryptedDataStr), 0600); err != nil {
-		return fmt.Errorf("failed to write temp vault file: %w", err)
-	}
+	return writeVaultFileAtomic(v.fullPath, []byte(encryptedDataStr))
+}
 
-	if err := os.Rename(tempFile, v.fullPath); err != nil {
-		_ = os.Remove(tempFile)
-		return fmt.Errorf("failed to move vault file: %w", err)
-	}
-
-	return nil
+// mutate runs a read-modify-write cycle under the cross-process vault lock.
+//
+// Reloading inside the lock is the point: in-memory state is a snapshot taken
+// when the provider was constructed, and every save rewrites the whole file.
+// Writing that snapshot back without refreshing silently discards whatever
+// another process stored in the meantime.
+func (v *AES256Vault) mutate(apply func() error) error {
+	return withVaultLock(v.fullPath, func() error {
+		if err := v.load(); err != nil {
+			return err
+		}
+		if err := apply(); err != nil {
+			return err
+		}
+		return v.save()
+	})
 }
 
 func (v *AES256Vault) ID() string {
 	return v.id
 }
 
-func (v *AES256Vault) Metadata() Metadata {
+func (v *AES256Vault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	if v.state == nil {
-		return Metadata{}
+		return Metadata{}, ErrVaultClosed
 	}
-	return v.state.Metadata
+	return v.state.Metadata, nil
 }
 
 func (v *AES256Vault) GetSecret(key string) (Secret, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if err := ValidateSecretKey(key); err != nil {
+		return nil, err
+	}
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
 
 	value, exists := v.state.Secrets[key]
 	if !exists {
@@ -221,42 +246,67 @@ func (v *AES256Vault) SetSecret(key string, secret Secret) error {
 	if err := ValidateSecretKey(key); err != nil {
 		return err
 	}
-
-	if v.state.Secrets == nil {
-		v.state.Secrets = make(map[string]string)
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	v.state.Secrets[key] = secret.PlainTextString()
-	return v.save()
+	return v.mutate(func() error {
+		if v.state.Secrets == nil {
+			v.state.Secrets = make(map[string]string)
+		}
+		v.state.Secrets[key] = secret.PlainTextString()
+		return nil
+	})
 }
 
 func (v *AES256Vault) DeleteSecret(key string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	_, exists := v.state.Secrets[key]
-	if !exists {
-		return ErrSecretNotFound
+	if err := ValidateSecretKey(key); err != nil {
+		return err
+	}
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	delete(v.state.Secrets, key)
-	return v.save()
+	// The existence check runs inside mutate, after the reload, so it sees the
+	// current on-disk contents rather than a stale snapshot.
+	return v.mutate(func() error {
+		if _, exists := v.state.Secrets[key]; !exists {
+			return ErrSecretNotFound
+		}
+		delete(v.state.Secrets, key)
+		return nil
+	})
 }
 
 func (v *AES256Vault) ListSecrets() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
+
 	keys := make([]string, 0, len(v.state.Secrets))
 	for k := range v.state.Secrets {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 
 func (v *AES256Vault) HasSecret(key string) (bool, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if err := ValidateSecretKey(key); err != nil {
+		return false, err
+	}
+	if v.state == nil {
+		return false, ErrVaultClosed
+	}
 
 	_, exists := v.state.Secrets[key]
 	return exists, nil
@@ -267,6 +317,9 @@ func (v *AES256Vault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	if v.state != nil {
+		clearSecrets(v.state.Secrets)
+	}
 	v.dek = ""
 	v.state = nil
 

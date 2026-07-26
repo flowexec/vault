@@ -34,76 +34,91 @@ func TestGenerateKey(t *testing.T) {
 	}
 }
 
-func TestDeriveKeyWithProvidedSalt(t *testing.T) {
-	salt, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("Failed to generate salt: %v", err)
-	}
-	decodedSalt, err := crypto.DecodeValue(salt)
-	if err != nil {
-		t.Fatalf("Failed to decode salt: %v", err)
-	}
-	if len(decodedSalt) == 0 {
-		t.Error("Decoded salt should not be empty")
-	}
+// The returned salt is passed back verbatim; it carries the parameters it was
+// produced with so a later change to the defaults cannot silently derive a
+// different key from the same salt.
+func TestDeriveKeyRoundTripsItsOwnSalt(t *testing.T) {
+	password := []byte("password")
 
-	inputPassword := []byte("password")
-	derivedKey, outSalt, err := crypto.DeriveKey(inputPassword, decodedSalt)
-	if err != nil {
-		t.Fatalf("Failed to derive key: %v", err)
-	}
-	if derivedKey == "" {
-		t.Error("Derived key should not be empty")
-	}
-	if outSalt != salt {
-		t.Errorf("Output salt should equal input salt, got %s, expected %s", outSalt, salt)
-	}
-
-	decodedDerivedKey, err := crypto.DecodeValue(derivedKey)
-	if err != nil {
-		t.Fatalf("Failed to decode derived key: %v", err)
-	}
-	if len(decodedDerivedKey) == 0 {
-		t.Error("Decoded derived key should not be empty")
-	}
-}
-
-func TestDeriveKeyWithoutSalt(t *testing.T) {
-	inputPassword := []byte("password")
-	derivedKey, outSalt, err := crypto.DeriveKey(inputPassword, nil)
+	derivedKey, outSalt, err := crypto.DeriveKey(password, nil)
 	if err != nil {
 		t.Fatalf("Failed to derive key without salt: %v", err)
 	}
-	if derivedKey == "" {
-		t.Error("Derived key should not be empty")
-	}
-	if outSalt == "" {
-		t.Error("Generated salt should not be empty")
+	if derivedKey == "" || outSalt == "" {
+		t.Fatal("Derived key and salt should not be empty")
 	}
 
 	decodedDerivedKey, err := crypto.DecodeValue(derivedKey)
 	if err != nil {
 		t.Fatalf("Failed to decode derived key: %v", err)
 	}
-	if len(decodedDerivedKey) == 0 {
-		t.Error("Decoded derived key should not be empty")
+	if len(decodedDerivedKey) != crypto.KeyLen {
+		t.Errorf("Derived key is %d bytes, want %d", len(decodedDerivedKey), crypto.KeyLen)
 	}
 
-	// Test reproducibility with same salt
-	decodedSalt, err := crypto.DecodeValue(outSalt)
+	derivedKey2, outSalt2, err := crypto.DeriveKey(password, []byte(outSalt))
 	if err != nil {
-		t.Fatalf("Failed to decode output salt: %v", err)
-	}
-
-	derivedKey2, outSalt2, err := crypto.DeriveKey(inputPassword, decodedSalt)
-	if err != nil {
-		t.Fatalf("Failed to derive key with same salt: %v", err)
+		t.Fatalf("Failed to derive key with the returned salt: %v", err)
 	}
 	if derivedKey != derivedKey2 {
-		t.Error("Keys derived with same password and salt should be identical")
+		t.Error("Keys derived with the same password and salt should be identical")
 	}
 	if outSalt != outSalt2 {
-		t.Error("Output salt should be same when input salt is provided")
+		t.Errorf("Salt should round trip unchanged, got %s, want %s", outSalt2, outSalt)
+	}
+}
+
+func TestDeriveKeyUsesDistinctSaltsPerCall(t *testing.T) {
+	password := []byte("password")
+
+	key1, salt1, err := crypto.DeriveKey(password, nil)
+	if err != nil {
+		t.Fatalf("Failed to derive first key: %v", err)
+	}
+	key2, salt2, err := crypto.DeriveKey(password, nil)
+	if err != nil {
+		t.Fatalf("Failed to derive second key: %v", err)
+	}
+
+	if salt1 == salt2 {
+		t.Error("Each derivation should generate a fresh salt")
+	}
+	if key1 == key2 {
+		t.Error("The same password with different salts must not produce the same key")
+	}
+}
+
+// []byte("") from a variable string is non-nil, so the old salt==nil check
+// never fired for the natural "I have no salt, generate one" call. That derived
+// an unsalted, fully deterministic key -- identical for every user with the
+// same passphrase, and precomputable.
+func TestDeriveKeyTreatsEmptySaltAsAbsentNotUnsalted(t *testing.T) {
+	password := []byte("password")
+	empty := ""
+
+	key1, salt1, err := crypto.DeriveKey(password, []byte(empty))
+	if err != nil {
+		t.Fatalf("Failed to derive key with empty salt: %v", err)
+	}
+	key2, salt2, err := crypto.DeriveKey(password, []byte(empty))
+	if err != nil {
+		t.Fatalf("Failed to derive second key with empty salt: %v", err)
+	}
+
+	if salt1 == "" || salt2 == "" {
+		t.Fatal("An empty salt must produce a freshly generated one")
+	}
+	if salt1 == salt2 {
+		t.Error("An empty salt produced the same salt twice; it is not being generated")
+	}
+	if key1 == key2 {
+		t.Error("An empty salt derived a deterministic key; the salt is not being applied")
+	}
+}
+
+func TestDeriveKeyRejectsShortSalts(t *testing.T) {
+	if _, _, err := crypto.DeriveKey([]byte("password"), []byte("tiny")); err == nil {
+		t.Error("Expected a short salt to be rejected")
 	}
 }
 
@@ -243,6 +258,27 @@ func TestInvalidKeys(t *testing.T) {
 	_, err = crypto.DecryptValue("invalid-key", encrypted)
 	if err == nil {
 		t.Error("Expected error for invalid key in decryption")
+	}
+}
+
+// aes.NewCipher accepts 16, 24 and 32 byte keys, so without an explicit length
+// check a short key silently downgrades an "AES256" vault to AES-128 or -192.
+func TestNonAES256KeysAreRejected(t *testing.T) {
+	for _, size := range []int{8, 16, 24, 31, 33, 64} {
+		key := crypto.EncodeValue(make([]byte, size))
+
+		if _, err := crypto.EncryptValue(key, "data"); err == nil {
+			t.Errorf("EncryptValue accepted a %d byte key, want rejection", size)
+		}
+		if _, err := crypto.DecryptValue(key, crypto.EncodeValue(make([]byte, 64))); err == nil {
+			t.Errorf("DecryptValue accepted a %d byte key, want rejection", size)
+		}
+	}
+
+	// The correct size still works.
+	valid := crypto.EncodeValue(make([]byte, crypto.KeyLen))
+	if _, err := crypto.EncryptValue(valid, "data"); err != nil {
+		t.Errorf("EncryptValue rejected a %d byte key: %v", crypto.KeyLen, err)
 	}
 }
 

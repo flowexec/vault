@@ -14,6 +14,8 @@ var (
 	ErrDecryptionFailed = errors.New("decryption failed")
 	ErrInvalidRecipient = errors.New("invalid recipient")
 	ErrPathNotSecure    = errors.New("path is not secure")
+	ErrVaultClosed      = errors.New("vault is closed")
+	ErrVaultCorrupt     = errors.New("vault file is corrupt")
 )
 
 type VaultPathError struct {

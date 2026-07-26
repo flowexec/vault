@@ -14,8 +14,10 @@ type Provider interface {
 	// ID returns a unique identifier for this vault instance
 	ID() string
 
-	// Metadata returns vault metadata such as creation time
-	Metadata() Metadata
+	// Metadata returns vault metadata such as creation time. It returns an error
+	// rather than a zero value so that a failing backend command, a timeout, and
+	// "no metadata configured" stay distinguishable.
+	Metadata() (Metadata, error)
 
 	Close() error
 }
@@ -28,28 +30,51 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 	for _, opt := range opts {
 		opt(config)
 	}
+	// Resolved after every option has been applied, so WithLocalPath no longer
+	// depends on WithProvider having come first in the argument list.
+	config.applyPendingLocalPath()
+
 	if err := config.Validate(); err != nil {
 		return nil, config, err
 	}
 
+	// Each branch returns an explicit nil on error. Returning the typed pointer
+	// directly wrapped a nil *AgeVault (etc.) in a non-nil Provider interface,
+	// so the usual `if provider != nil` check passed and the next method call
+	// panicked on a nil receiver.
 	switch config.Type {
 	case ProviderTypeAge:
 		provider, err := NewAgeVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeAES256:
 		provider, err := NewAES256Vault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeKeyring:
 		provider, err := NewKeyringVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeUnencrypted:
 		provider, err := NewUnencryptedVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeExternal:
 		provider, err := NewExternalVaultProvider(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	}
-	return nil, nil, fmt.Errorf("unsupported vault type: %s", config.Type)
+	return nil, config, fmt.Errorf("%w: unsupported vault type: %s", ErrInvalidConfig, config.Type)
 }
 
 // WithProvider sets the vault provider type
@@ -99,18 +124,34 @@ func WithKeyringService(service string) Option {
 	}
 }
 
-// WithLocalPath sets the local vault storage path (works for Age, AES, and Unencrypted based on provider type)
+// WithLocalPath sets the local vault storage path (works for Age, AES, and Unencrypted based on provider type).
+//
+// The path is applied once all options have been processed, so it does not
+// matter whether WithProvider is passed before or after it. Previously this
+// switched on c.Type immediately and was a silent no-op unless WithProvider
+// happened to come first, surfacing later as "storage path is required".
 func WithLocalPath(path string) Option {
 	return func(c *Config) {
-		//nolint:exhaustive
-		switch c.Type {
-		case ProviderTypeAge:
-			WithAgePath(path)(c)
-		case ProviderTypeAES256:
-			WithAESPath(path)(c)
-		case ProviderTypeUnencrypted:
-			WithUnencryptedPath(path)(c)
-		}
+		c.pendingLocalPath = path
+	}
+}
+
+// applyPendingLocalPath routes a WithLocalPath value to the provider-specific
+// field now that the provider type is known.
+func (c *Config) applyPendingLocalPath() {
+	if c.pendingLocalPath == "" {
+		return
+	}
+	path := c.pendingLocalPath
+
+	//nolint:exhaustive
+	switch c.Type {
+	case ProviderTypeAge:
+		WithAgePath(path)(c)
+	case ProviderTypeAES256:
+		WithAESPath(path)(c)
+	case ProviderTypeUnencrypted:
+		WithUnencryptedPath(path)(c)
 	}
 }
 

@@ -3,31 +3,27 @@
   "type": "external",
   "external": {
     "get": {
-      "cmd": "pass show {{key}}",
-      "output": "{{output}}"
+      "cmd": "pass show '{{key}}'"
     },
     "set": {
-      "cmd": "pass insert -e {{key}}",
+      "cmd": "pass insert -m -f '{{key}}' >/dev/null",
       "input": "{{value}}"
     },
     "delete": {
-      "cmd": "pass rm -f {{key}}"
+      "cmd": "pass rm -f '{{key}}' >/dev/null"
     },
     "list": {
-      "cmd": "pass ls",
-      "output": "{{output}}"
+      "cmd": "cd \"${PASSWORD_STORE_DIR:-$HOME/.password-store}\" && find . -name '*.gpg' -type f | sed -e 's|^\\./||' -e 's|\\.gpg$||'"
     },
+    "separator": "\n",
     "exists": {
-      "cmd": "pass show {{key}}"
+      "cmd": "test -f \"${PASSWORD_STORE_DIR:-$HOME/.password-store}/{{key}}.gpg\""
     },
     "metadata": {
-      "cmd": "pass git log --oneline -1",
-      "output": "Last change: {{output}}"
+      "cmd": "cat \"${PASSWORD_STORE_DIR:-$HOME/.password-store}/.gpg-id\"",
+      "output": "pass store recipients: {{ trim(output) }}"
     },
-    "environment": {
-      "PASSWORD_STORE_DIR": "$PASSWORD_STORE_DIR",
-      "GPG_TTY": "$(tty)"
-    },
-    "timeout": "30s"
+    "not_found_pattern": "is not in the password store",
+    "timeout": "120s"
   }
 }

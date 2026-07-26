@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -46,10 +45,14 @@ func NewAgeVault(cfg *Config) (*AgeVault, error) {
 		return nil, fmt.Errorf("age configuration is required")
 	}
 
-	path := filepath.Join(
-		filepath.Clean(cfg.Age.StoragePath),
-		filepath.Clean(fmt.Sprintf("%s-%s.%s", vaultFileBase, cfg.ID, ageVaultFileExt)),
-	)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	path, err := resolveVaultPath(cfg.Age.StoragePath, cfg.ID, ageVaultFileExt)
+	if err != nil {
+		return nil, err
+	}
 
 	vault := &AgeVault{
 		mu:       sync.RWMutex{},
@@ -101,24 +104,31 @@ func (v *AgeVault) init() error {
 		return fmt.Errorf("no recipients available for encryption, please add at least one recipient")
 	}
 
+	// Creating a vault encrypted only to someone else's key produces a file
+	// that cannot be opened again -- including by the process that just wrote
+	// it. Catch that here rather than at the next load.
+	if !v.canDecryptWith(v.state.Recipients) {
+		return fmt.Errorf(
+			"%w: none of the configured recipients match your identity, "+
+				"so the vault would be unreadable as soon as it is written",
+			ErrInvalidRecipient,
+		)
+	}
+
 	if err := v.parseRecipients(); err != nil {
 		return fmt.Errorf("failed to parse recipients: %w", err)
 	}
 
-	return v.save()
+	return withVaultLock(v.fullPath, v.save)
 }
 
 // load reads the vault file and decrypts its contents
 func (v *AgeVault) load() error {
-	data, err := os.ReadFile(v.fullPath)
+	data, exists, err := readVaultFile(v.fullPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to read vault file: %w", err)
+		return err
 	}
-
-	if len(data) == 0 {
+	if !exists {
 		return nil
 	}
 
@@ -132,6 +142,10 @@ func (v *AgeVault) load() error {
 		return fmt.Errorf("failed to unmarshal vault state: %w", err)
 	}
 
+	if err := checkVaultVersion(state.Version, ageCurrentVaultVersion, v.fullPath); err != nil {
+		return err
+	}
+
 	v.state = &state
 	if err := v.parseRecipients(); err != nil {
 		return fmt.Errorf("failed to parse recipients: %w", err)
@@ -143,7 +157,7 @@ func (v *AgeVault) load() error {
 // save encrypts and writes the vault contents to disk
 func (v *AgeVault) save() error {
 	if v.state == nil {
-		return nil
+		return ErrVaultClosed
 	}
 
 	if len(v.recipients) == 0 {
@@ -169,40 +183,47 @@ func (v *AgeVault) save() error {
 		return fmt.Errorf("failed to finalize encryption: %w", err)
 	}
 
-	// write to the file atomically
-	if err := os.MkdirAll(filepath.Dir(v.fullPath), 0750); err != nil {
-		return fmt.Errorf("failed to create vault directory: %w", err)
-	}
-	tempFile := v.fullPath + ".tmp"
-	if err := os.WriteFile(tempFile, buf.Bytes(), 0600); err != nil {
-		return fmt.Errorf("failed to write temp vault file: %w", err)
-	}
+	return writeVaultFileAtomic(v.fullPath, buf.Bytes())
+}
 
-	if err := os.Rename(tempFile, v.fullPath); err != nil {
-		_ = os.Remove(tempFile)
-		return fmt.Errorf("failed to move vault file: %w", err)
-	}
-
-	return nil
+// mutate runs a read-modify-write cycle under the cross-process vault lock.
+// See AES256Vault.mutate for why the reload inside the lock is required.
+func (v *AgeVault) mutate(apply func() error) error {
+	return withVaultLock(v.fullPath, func() error {
+		if err := v.load(); err != nil {
+			return err
+		}
+		if err := apply(); err != nil {
+			return err
+		}
+		return v.save()
+	})
 }
 
 func (v *AgeVault) ID() string {
 	return v.id
 }
 
-func (v *AgeVault) Metadata() Metadata {
+func (v *AgeVault) Metadata() (Metadata, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
 	if v.state == nil {
-		return Metadata{}
+		return Metadata{}, ErrVaultClosed
 	}
-	return v.state.Metadata
+	return v.state.Metadata, nil
 }
 
 func (v *AgeVault) GetSecret(key string) (Secret, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if err := ValidateSecretKey(key); err != nil {
+		return nil, err
+	}
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
 
 	value, exists := v.state.Secrets[key]
 	if !exists {
@@ -219,36 +240,54 @@ func (v *AgeVault) SetSecret(key string, value Secret) error {
 	if err := ValidateSecretKey(key); err != nil {
 		return err
 	}
-
-	if v.state.Secrets == nil {
-		v.state.Secrets = make(map[string]string)
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	v.state.Secrets[key] = value.PlainTextString()
-	return v.save()
+	return v.mutate(func() error {
+		if v.state.Secrets == nil {
+			v.state.Secrets = make(map[string]string)
+		}
+		v.state.Secrets[key] = value.PlainTextString()
+		return nil
+	})
 }
 
 func (v *AgeVault) DeleteSecret(key string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	_, exists := v.state.Secrets[key]
-	if !exists {
-		return ErrSecretNotFound
+	if err := ValidateSecretKey(key); err != nil {
+		return err
+	}
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	delete(v.state.Secrets, key)
-	return v.save()
+	// The existence check runs inside mutate, after the reload, so it sees the
+	// current on-disk contents rather than a stale snapshot.
+	return v.mutate(func() error {
+		if _, exists := v.state.Secrets[key]; !exists {
+			return ErrSecretNotFound
+		}
+		delete(v.state.Secrets, key)
+		return nil
+	})
 }
 
 func (v *AgeVault) ListSecrets() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
+
 	keys := make([]string, 0, len(v.state.Secrets))
 	for k := range v.state.Secrets {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 
@@ -256,8 +295,39 @@ func (v *AgeVault) HasSecret(key string) (bool, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	if err := ValidateSecretKey(key); err != nil {
+		return false, err
+	}
+	if v.state == nil {
+		return false, ErrVaultClosed
+	}
+
 	_, exists := v.state.Secrets[key]
 	return exists, nil
+}
+
+// canDecryptWith reports whether any resolved identity appears in recipients.
+// Encrypting to a set that excludes your own key produces a vault you can never
+// reopen, and a single mistyped public key is enough to do it.
+func (v *AgeVault) canDecryptWith(recipients []string) bool {
+	own := make(map[string]struct{}, len(v.identities))
+	for _, id := range v.identities {
+		if x, ok := id.(*age.X25519Identity); ok {
+			own[x.Recipient().String()] = struct{}{}
+		}
+	}
+	if len(own) == 0 {
+		// An identity type we cannot map to a recipient string; do not block on
+		// a check we are unable to perform.
+		return true
+	}
+
+	for _, r := range recipients {
+		if _, ok := own[r]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (v *AgeVault) Close() error {
@@ -265,6 +335,9 @@ func (v *AgeVault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	if v.state != nil {
+		clearSecrets(v.state.Secrets)
+	}
 	v.state = nil
 	v.recipients = nil
 	v.identities = nil
@@ -276,48 +349,76 @@ func (v *AgeVault) AddRecipient(publicKey string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	if err := v.addRecipientToState(publicKey); err != nil {
-		return err
-	}
-	if err := v.parseRecipients(); err != nil {
-		return fmt.Errorf("failed to parse recipients: %w", err)
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	return v.save()
+	return v.mutate(func() error {
+		if err := v.addRecipientToState(publicKey); err != nil {
+			return err
+		}
+		return v.parseRecipients()
+	})
 }
 
 func (v *AgeVault) RemoveRecipient(publicKey string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// Don't allow removing the last recipient
-	if len(v.state.Recipients) <= 1 {
-		return fmt.Errorf("cannot remove the last recipient - at least one recipient is required for encryption")
+	if v.state == nil {
+		return ErrVaultClosed
 	}
 
-	found := false
-	for i, rec := range v.state.Recipients {
-		if rec == publicKey {
-			v.state.Recipients = append(v.state.Recipients[:i], v.state.Recipients[i+1:]...)
-			found = true
-			break
+	return v.mutate(func() error {
+		// Don't allow removing the last recipient
+		if len(v.state.Recipients) <= 1 {
+			return fmt.Errorf("cannot remove the last recipient - at least one recipient is required for encryption")
 		}
-	}
 
-	if !found {
-		return fmt.Errorf("recipient %s not found", publicKey)
-	}
+		remaining := make([]string, 0, len(v.state.Recipients))
+		found := false
+		for _, rec := range v.state.Recipients {
+			if rec == publicKey {
+				found = true
+				continue
+			}
+			remaining = append(remaining, rec)
+		}
 
-	if err := v.parseRecipients(); err != nil {
-		return fmt.Errorf("failed to parse recipients: %w", err)
-	}
+		if !found {
+			return fmt.Errorf("recipient %s not found", publicKey)
+		}
 
-	return v.save()
+		// Refusing here is the difference between "you removed a colleague" and
+		// "you locked yourself out permanently". The previous check only
+		// guarded the *last* recipient, not your own.
+		if !v.canDecryptWith(remaining) {
+			return fmt.Errorf(
+				"%w: removing %s would leave no recipient matching your identity, "+
+					"making the vault permanently unreadable",
+				ErrInvalidRecipient, publicKey,
+			)
+		}
+
+		// Commit to state only once the new set is known to parse, so a failure
+		// cannot leave in-memory recipients inconsistent with what is on disk.
+		previous := v.state.Recipients
+		v.state.Recipients = remaining
+		if err := v.parseRecipients(); err != nil {
+			v.state.Recipients = previous
+			return fmt.Errorf("failed to parse recipients: %w", err)
+		}
+		return nil
+	})
 }
 
 func (v *AgeVault) ListRecipients() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+
+	if v.state == nil {
+		return nil, ErrVaultClosed
+	}
 
 	recipients := make([]string, len(v.state.Recipients))
 	copy(recipients, v.state.Recipients) // prevent modification of internal state
