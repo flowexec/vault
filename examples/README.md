@@ -12,12 +12,13 @@ This directory contains ready-to-use configurations for popular CLI tools.
 ## Quick Start
 
 ```bash
-# Test a configuration
-./test-provider.sh providers/bitwarden.json
-
-# Run the Go example
+# Run the Go example against a configuration
 go run main.go providers/pass.json
 ```
+
+These configurations are covered by `TestShippedExampleProvidersAreUsable`, which
+loads each one, renders every operation, and asserts that the secret value reaches
+the backend over stdin and never appears in a command string.
 
 ## Setup Instructions
 
@@ -54,7 +55,8 @@ Each configuration follows this pattern:
       "output": "{{output}}"
     },
     "set": {
-      "cmd": "subcommand {{key}} {{value}}"
+      "cmd": "subcommand {{key}}",
+      "input": "{{value}}"
     },
     "list": {
       "cmd": "list-subcommand"
@@ -78,9 +80,30 @@ Each configuration follows this pattern:
 
 ## Template Variables
 
-Available in `cmd` and `output` fields:
+In `cmd` fields:
 
-- `{{key}}` - The secret key/name
-- `{{value}}` - The secret value (for set operations)
+- `{{key}}` - The secret key/name (also available as `ref`, `id`, `name`)
 - `{{env["VariableName"]}}`- Environment variable value
-- `{{output}}` - Raw command output (for output templates)
+
+In `input` fields (piped to the command's stdin):
+
+- `{{value}}` - The secret value, on `set` only
+- `{{input}}` - The secret key
+- `{{env["VariableName"]}}`
+
+In `output` fields:
+
+- `{{output}}` - Raw command output
+
+### The secret value is never available to a `cmd` template
+
+A rendered command is parsed and executed by a shell, and the template engine
+performs no quoting. Interpolating a secret there is a command-injection sink and
+silently corrupts any value containing shell metacharacters -- `p@$$w0rd` has `$$`
+expanded to the process ID, and `correct horse battery` word-splits to `correct`.
+
+Configurations that reference `{{value}}` or `{{password}}` in any `cmd` are
+rejected at load. Pass the secret over stdin with an `input` template instead.
+
+Shell syntax in a `cmd` works normally: `$VAR`, `${VAR:-default}` and `$(...)` are
+resolved by the interpreter, with the configured `environment` in scope.

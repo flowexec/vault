@@ -3,31 +3,30 @@
   "type": "external",
   "external": {
     "get": {
-      "cmd": "aws ssm get-parameter --name /{{key}} --with-decryption --query Parameter.Value --output text",
-      "output": "{{output}}"
+      "cmd": "aws ssm get-parameter --name '/{{key}}' --with-decryption --query Parameter.Value --output text"
     },
     "set": {
-      "cmd": "aws ssm put-parameter --name /{{key}} --value {{value}} --type SecureString --overwrite"
+      "cmd": "aws ssm put-parameter --name '/{{key}}' --value file:///dev/stdin --type SecureString --overwrite --output json >/dev/null",
+      "input": "{{value}}"
     },
     "delete": {
-      "cmd": "aws ssm delete-parameter --name /{{key}}"
+      "cmd": "aws ssm delete-parameter --name '/{{key}}' --output json >/dev/null"
     },
     "list": {
-      "cmd": "aws ssm describe-parameters --query Parameters[].Name --output text",
-      "output": "{{output}}"
+      "cmd": "aws ssm get-parameters-by-path --path / --output json",
+      "output": "{{ join(map(fromJSON(output)[\"Parameters\"], {trimPrefix(.Name, \"/\")}), \"\\n\") }}"
     },
-    "listSeparator": "\t",
+    "separator": "\n",
     "exists": {
-      "cmd": "aws ssm get-parameter --name /{{key}}"
+      "cmd": "aws ssm get-parameter --name '/{{key}}' --query Parameter.Name --output text >/dev/null"
     },
     "metadata": {
       "cmd": "aws sts get-caller-identity --output json",
-      "output": "Account: {{fromJSON(output)[\"Account\"]}}, User: {{fromJSON(output)[\"Arn\"]}}"
+      "output": "AWS account {{ fromJSON(output)[\"Account\"] }} as {{ fromJSON(output)[\"Arn\"] }}"
     },
+    "not_found_pattern": "ParameterNotFound",
     "environment": {
-      "AWS_REGION": "$AWS_REGION",
-      "AWS_ACCESS_KEY_ID": "$AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY": "$AWS_SECRET_ACCESS_KEY"
+      "AWS_PAGER": ""
     },
     "timeout": "60s"
   }
