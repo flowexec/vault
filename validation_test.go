@@ -146,6 +146,62 @@ func TestSecretMasksItselfEvenWhenDereferenced(t *testing.T) {
 	}
 }
 
+// WithLocalPath switched on the provider type the moment it ran, so it was a
+// silent no-op unless WithProvider happened to be passed first -- surfacing
+// later as a confusing "storage path is required".
+func TestWithLocalPathIsOrderIndependent(t *testing.T) {
+	t.Run("path before provider", func(t *testing.T) {
+		dir := t.TempDir()
+		_, cfg, err := vault.New("v1",
+			vault.WithLocalPath(dir),
+			vault.WithProvider(vault.ProviderTypeUnencrypted),
+		)
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		if cfg.Unencrypted == nil || cfg.Unencrypted.StoragePath != dir {
+			t.Errorf("storage path was not applied: %+v", cfg.Unencrypted)
+		}
+	})
+
+	t.Run("provider before path", func(t *testing.T) {
+		dir := t.TempDir()
+		_, cfg, err := vault.New("v1",
+			vault.WithProvider(vault.ProviderTypeUnencrypted),
+			vault.WithLocalPath(dir),
+		)
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		if cfg.Unencrypted == nil || cfg.Unencrypted.StoragePath != dir {
+			t.Errorf("storage path was not applied: %+v", cfg.Unencrypted)
+		}
+	})
+}
+
+// The version field was written on every save but never read back, so a vault
+// from a future format would have been parsed as though it were current.
+func TestNewerVaultVersionIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault-v1.json")
+
+	if err := os.WriteFile(path, []byte(`{"version":99,"id":"v1","secrets":{}}`), 0600); err != nil {
+		t.Fatalf("failed to seed vault file: %v", err)
+	}
+
+	_, err := vault.NewUnencryptedVault(&vault.Config{
+		ID:          "v1",
+		Type:        vault.ProviderTypeUnencrypted,
+		Unencrypted: &vault.UnencryptedConfig{StoragePath: dir},
+	})
+	if err == nil {
+		t.Fatal("a newer vault format version was accepted")
+	}
+	if !errors.Is(err, vault.ErrVaultCorrupt) {
+		t.Errorf("error = %v, want ErrVaultCorrupt", err)
+	}
+}
+
 func TestSecretZeroClearsTheBuffer(t *testing.T) {
 	secret := vault.NewSecretValue([]byte("top-secret-value"))
 	secret.Zero()

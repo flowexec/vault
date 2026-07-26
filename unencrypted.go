@@ -94,6 +94,10 @@ func (v *UnencryptedVault) load() error {
 		return fmt.Errorf("failed to parse vault file: %w", err)
 	}
 
+	if err := checkVaultVersion(state.Version, unencryptedCurrentVaultVersion, v.fullPath); err != nil {
+		return err
+	}
+
 	v.state = &state
 	return nil
 }
@@ -242,6 +246,9 @@ func (v *UnencryptedVault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	if v.state != nil {
+		clearSecrets(v.state.Secrets)
+	}
 	v.state = nil
 
 	return nil

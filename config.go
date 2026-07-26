@@ -27,6 +27,10 @@ type Config struct {
 	External    *ExternalConfig    `json:"external,omitempty"`
 	Keyring     *KeyringConfig     `json:"keyring,omitempty"`
 	Unencrypted *UnencryptedConfig `json:"unencrypted,omitempty"`
+
+	// pendingLocalPath holds a WithLocalPath value until the provider type is
+	// known. Unexported so it never reaches the serialized config.
+	pendingLocalPath string
 }
 
 func (c *Config) Validate() error {

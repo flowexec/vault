@@ -30,6 +30,10 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 	for _, opt := range opts {
 		opt(config)
 	}
+	// Resolved after every option has been applied, so WithLocalPath no longer
+	// depends on WithProvider having come first in the argument list.
+	config.applyPendingLocalPath()
+
 	if err := config.Validate(); err != nil {
 		return nil, config, err
 	}
@@ -120,18 +124,34 @@ func WithKeyringService(service string) Option {
 	}
 }
 
-// WithLocalPath sets the local vault storage path (works for Age, AES, and Unencrypted based on provider type)
+// WithLocalPath sets the local vault storage path (works for Age, AES, and Unencrypted based on provider type).
+//
+// The path is applied once all options have been processed, so it does not
+// matter whether WithProvider is passed before or after it. Previously this
+// switched on c.Type immediately and was a silent no-op unless WithProvider
+// happened to come first, surfacing later as "storage path is required".
 func WithLocalPath(path string) Option {
 	return func(c *Config) {
-		//nolint:exhaustive
-		switch c.Type {
-		case ProviderTypeAge:
-			WithAgePath(path)(c)
-		case ProviderTypeAES256:
-			WithAESPath(path)(c)
-		case ProviderTypeUnencrypted:
-			WithUnencryptedPath(path)(c)
-		}
+		c.pendingLocalPath = path
+	}
+}
+
+// applyPendingLocalPath routes a WithLocalPath value to the provider-specific
+// field now that the provider type is known.
+func (c *Config) applyPendingLocalPath() {
+	if c.pendingLocalPath == "" {
+		return
+	}
+	path := c.pendingLocalPath
+
+	//nolint:exhaustive
+	switch c.Type {
+	case ProviderTypeAge:
+		WithAgePath(path)(c)
+	case ProviderTypeAES256:
+		WithAESPath(path)(c)
+	case ProviderTypeUnencrypted:
+		WithUnencryptedPath(path)(c)
 	}
 }
 

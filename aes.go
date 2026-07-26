@@ -20,7 +20,10 @@ const (
 type AESState struct {
 	Metadata `yaml:"metadata"`
 
-	Version int               `json:"version"`
+	// yaml, not json: this struct is marshaled with gopkg.in/yaml.v3, which
+	// ignores json tags and would otherwise have keyed this field as "version"
+	// only by lowercasing coincidence.
+	Version int               `yaml:"version"`
 	ID      string            `yaml:"id"`
 	Secrets map[string]string `yaml:"secrets"`
 }
@@ -154,6 +157,10 @@ func (v *AES256Vault) load() error {
 	if err := yaml.Unmarshal([]byte(dataStr), &state); err != nil {
 		return fmt.Errorf("failed to unmarshal vault state: %w", err)
 	}
+	if err := checkVaultVersion(state.Version, aesCurrentVaultVersion, v.fullPath); err != nil {
+		return err
+	}
+
 	v.state = &state
 	return nil
 }
@@ -310,6 +317,9 @@ func (v *AES256Vault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	if v.state != nil {
+		clearSecrets(v.state.Secrets)
+	}
 	v.dek = ""
 	v.state = nil
 

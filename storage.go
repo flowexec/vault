@@ -53,6 +53,30 @@ func resolveVaultPath(storagePath, id, ext string) (string, error) {
 	return full, nil
 }
 
+// checkVaultVersion rejects a vault written by a newer version of the library.
+// The version field was recorded on every save but never read back, so a future
+// format change would have been parsed as though it were the current one.
+func checkVaultVersion(version, current int, path string) error {
+	if version > current {
+		return fmt.Errorf(
+			"%w: vault file %s is version %d but this build understands up to %d; upgrade to open it",
+			ErrVaultCorrupt, path, version, current,
+		)
+	}
+	return nil
+}
+
+// clearSecrets overwrites and removes every entry in a secrets map.
+//
+// This drops references promptly, but cannot be more than that: the values are
+// immutable Go strings whose backing bytes are not addressable, and the runtime
+// may already have copied them during a heap move. See SecretValue.Zero.
+func clearSecrets(secrets map[string]string) {
+	for k := range secrets {
+		delete(secrets, k)
+	}
+}
+
 // readVaultFile reads a vault file from disk.
 //
 // The boolean reports whether the file exists. Only a genuinely absent file

@@ -142,6 +142,10 @@ func (v *AgeVault) load() error {
 		return fmt.Errorf("failed to unmarshal vault state: %w", err)
 	}
 
+	if err := checkVaultVersion(state.Version, ageCurrentVaultVersion, v.fullPath); err != nil {
+		return err
+	}
+
 	v.state = &state
 	if err := v.parseRecipients(); err != nil {
 		return fmt.Errorf("failed to parse recipients: %w", err)
@@ -331,6 +335,9 @@ func (v *AgeVault) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	if v.state != nil {
+		clearSecrets(v.state.Secrets)
+	}
 	v.state = nil
 	v.recipients = nil
 	v.identities = nil

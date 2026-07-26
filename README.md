@@ -63,7 +63,7 @@ Stores secrets in an AES-256 encrypted file with configurable key sources.
 ```go
 provider, _, err := vault.New("my-vault",
     vault.WithProvider(vault.ProviderTypeAES256),
-    vault.WithAESPath("~/secrets.vault"),
+    vault.WithAESPath("~/.config/flow/vaults"), // a directory, not a file
 )
 ```
 
@@ -79,7 +79,7 @@ Uses the [age encryption tool](https://age-encryption.org/) with public key cryp
 ```go
 provider, _, err := vault.New("my-vault", 
     vault.WithProvider(vault.ProviderTypeAge),
-    vault.WithAgePath("~/secrets.age"),
+    vault.WithAgePath("~/.config/flow/vaults"), // a directory, not a file
 )
 ```
 
@@ -107,7 +107,7 @@ Stores secrets in plain text JSON files.
 ```go
 provider, _, err := vault.New("my-vault",
     vault.WithProvider(vault.ProviderTypeUnencrypted), 
-    vault.WithUnencryptedPath("~/dev-secrets.json"),
+    vault.WithUnencryptedPath("~/.config/flow/vaults"), // a directory, not a file
 )
 ```
 
@@ -165,7 +165,7 @@ secrets, _ := provider.ListSecrets()
 exists, _ := provider.HasSecret("api-key")
 
 // Get vault metadata
-metadata := provider.Metadata()
+metadata, err := provider.Metadata()
 ```
 
 ### Configuration from File
