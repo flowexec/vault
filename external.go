@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,17 @@ func NewExternalVaultProvider(cfg *Config) (*ExternalVaultProvider, error) {
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	// Checked here rather than in Validate because a config file rendered from a
+	// preset legitimately arrives without one -- the consuming tool decides where
+	// vault state lives and fills it in. By construction time there is no one
+	// left to fill it in, and a vault that cannot reach its registry cannot
+	// resolve a single key.
+	if cfg.External.StoragePath == "" {
+		return nil, fmt.Errorf(
+			"%w: external vault %q needs a storage path for its link registry",
+			ErrInvalidConfig, cfg.ID,
+		)
 	}
 
 	// Timeout is validated by ExternalConfig.Validate, so this cannot fail here.
@@ -78,10 +90,6 @@ func (v *ExternalVaultProvider) GetSecret(key string) (Secret, error) {
 // sync.RWMutex does not support recursive read locking, so a writer arriving
 // between the two RLock calls would deadlock both.
 func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
-	if err := ValidateSecretKey(key); err != nil {
-		return nil, err
-	}
-
 	if v.closed {
 		return nil, ErrVaultClosed
 	}
@@ -90,14 +98,22 @@ func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 		return nil, fmt.Errorf("%w: get operation not configured", ErrInvalidConfig)
 	}
 
-	cmd, err := v.renderCmdTemplate(v.cfg.Get.CommandTemplate, key)
+	// Resolving first means an unlinked key costs nothing: no process is spawned,
+	// no network call is made, and the caller gets ErrSecretNotFound rather than
+	// whatever the provider says about a name it has never heard of.
+	reference, err := v.referenceLocked(key)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd, err := v.renderCmdTemplate(v.cfg.Get.CommandTemplate, key, reference)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render get cmd: %w", err)
 	}
 
 	var input string
 	if v.cfg.Get.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Get.InputTemplate, key)
+		input, err = v.renderInputTemplate(v.cfg.Get.InputTemplate, key, reference)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render input template: %w", err)
 		}
@@ -105,6 +121,12 @@ func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 
 	output, err := v.executeCommand(cmd, input)
 	if err != nil {
+		if v.isNotFoundErr(err) {
+			return nil, fmt.Errorf(
+				"%w: %s is linked to %s, which the provider could not find",
+				ErrSecretNotFound, key, reference,
+			)
+		}
 		return nil, fmt.Errorf("failed to get secret: %w", err)
 	}
 
@@ -121,87 +143,46 @@ func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 	return NewSecretValue([]byte(secretValue)), nil
 }
 
-func (v *ExternalVaultProvider) SetSecret(key string, value Secret) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if err := ValidateSecretKey(key); err != nil {
-		return err
-	}
+// SetSecret always fails. An external vault resolves references to secrets kept
+// in another system and never writes to it.
+//
+// This is not a missing feature. Writing through meant handing the value to a
+// provider CLI, and no supported provider accepts one safely: 1Password takes it
+// as an argv assignment, visible to every process on the machine. It also meant
+// a set that rebuilt an item from scratch, discarding whatever else was on it.
+func (v *ExternalVaultProvider) SetSecret(_ string, _ Secret) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
 
 	if v.closed {
 		return ErrVaultClosed
 	}
 
-	if v.cfg.Set.CommandTemplate == "" {
-		return fmt.Errorf("%w: set operation not configured", ErrInvalidConfig)
-	}
-
-	// The secret value is deliberately not available to the command template. The
-	// rendered command is parsed and run by a shell, and the template engine does
-	// no quoting, so interpolating a secret there is a command-injection sink and
-	// silently corrupts any value containing shell metacharacters. Values travel
-	// over stdin via the set input template instead. ExternalConfig.Validate
-	// rejects configs that still reference {{ value }} in the set command.
-	cmd, err := v.renderCmdTemplate(v.cfg.Set.CommandTemplate, key)
-	if err != nil {
-		return fmt.Errorf("failed to render set cmd: %w", err)
-	}
-
-	var input string
-	if v.cfg.Set.InputTemplate != "" {
-		input, err = v.renderInputTemplateWithValue(v.cfg.Set.InputTemplate, key, value.PlainTextString())
-		if err != nil {
-			return fmt.Errorf("failed to render input template: %w", err)
-		}
-	}
-
-	// The error from executeCommand already carries stderr. Do not add the command
-	// output here: a backend that echoes the failing command back would put the
-	// secret value into the returned error string.
-	if _, err := v.executeCommand(cmd, input); err != nil {
-		return fmt.Errorf("failed to set secret: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf(
+		"%w: vault %s reads through to an external provider. Create the secret in that "+
+			"provider, then link it",
+		ErrReadOnly, v.id,
+	)
 }
 
+// DeleteSecret removes a link. The referenced secret is not touched.
+//
+// This is the one method whose meaning differs from the other providers: on an
+// aes or age vault Delete destroys secret material, and here it only forgets
+// where something is. That asymmetry is the point -- an external vault points at
+// data it does not own, and a vault should not be able to destroy a colleague's
+// 1Password item because someone tidied up a key list. Callers that phrase a
+// confirmation prompt should say "unlink", not "delete".
 func (v *ExternalVaultProvider) DeleteSecret(key string) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if err := ValidateSecretKey(key); err != nil {
-		return err
-	}
-
-	if v.closed {
-		return ErrVaultClosed
-	}
-
-	if v.cfg.Delete.CommandTemplate == "" {
-		return fmt.Errorf("%w: delete operation not configured", ErrInvalidConfig)
-	}
-
-	cmd, err := v.renderCmdTemplate(v.cfg.Delete.CommandTemplate, key)
-	if err != nil {
-		return fmt.Errorf("failed to render delete cmd: %w", err)
-	}
-
-	var input string
-	if v.cfg.Delete.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Delete.InputTemplate, key)
-		if err != nil {
-			return fmt.Errorf("failed to render input template: %w", err)
-		}
-	}
-
-	if _, err := v.executeCommand(cmd, input); err != nil {
-		return fmt.Errorf("failed to delete secret: %w", err)
-	}
-
-	return nil
+	return v.Unlink(key)
 }
 
+// ListSecrets returns the linked keys, sorted.
+//
+// These are the vault's contents, not the provider's. A vault knows about what
+// has been linked into it; the provider's full inventory is a separate question
+// and browsing it is a job for a discovery command, not for a list of secrets
+// the caller can actually resolve.
 func (v *ExternalVaultProvider) ListSecrets() ([]string, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -210,58 +191,26 @@ func (v *ExternalVaultProvider) ListSecrets() ([]string, error) {
 		return nil, ErrVaultClosed
 	}
 
-	if v.cfg.List.CommandTemplate == "" {
-		return nil, fmt.Errorf("%w: list operation not configured", ErrInvalidConfig)
-	}
-
-	cmd, err := v.renderCmdTemplate(v.cfg.List.CommandTemplate, "")
+	reg, err := v.loadRegistry()
 	if err != nil {
-		return nil, fmt.Errorf("failed to render list cmd: %w", err)
+		return nil, err
 	}
 
-	var input string
-	if v.cfg.List.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.List.InputTemplate, "")
-		if err != nil {
-			return nil, fmt.Errorf("failed to render input template: %w", err)
-		}
+	keys := make([]string, 0, len(reg.Links))
+	for key := range reg.Links {
+		keys = append(keys, key)
 	}
-
-	output, err := v.executeCommand(cmd, input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list secrets: %w", err)
-	}
-
-	var secretsList string
-	if v.cfg.List.OutputTemplate != "" {
-		secretsList, err = v.renderOutputTemplate(v.cfg.List.OutputTemplate, output)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse list output: %w", err)
-		}
-	} else {
-		secretsList = strings.TrimSpace(output)
-	}
-
-	if secretsList == "" {
-		return []string{}, nil
-	}
-
-	sep := v.cfg.ListSeparator
-	if sep == "" {
-		sep = "\n"
-	}
-	secrets := strings.Split(secretsList, sep)
-	result := make([]string, 0, len(secrets))
-	for _, secret := range secrets {
-		secret = strings.TrimSpace(secret)
-		if secret != "" {
-			result = append(result, secret)
-		}
-	}
-
-	return result, nil
+	sort.Strings(keys)
+	return keys, nil
 }
 
+// HasSecret reports whether a key is linked.
+//
+// Registry lookup only: it deliberately does not verify that the reference still
+// resolves. That would spawn a provider process and reach the network to answer
+// a boolean, and callers use this on paths where that cost is not expected. A
+// link whose target has been deleted in the provider surfaces at GetSecret,
+// which is where the caller is already prepared to wait and to handle failure.
 func (v *ExternalVaultProvider) HasSecret(key string) (bool, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -274,55 +223,13 @@ func (v *ExternalVaultProvider) HasSecret(key string) (bool, error) {
 		return false, ErrVaultClosed
 	}
 
-	if v.cfg.Exists.CommandTemplate != "" {
-		return v.hasSecretViaExistsCmd(key)
-	}
-
-	if _, err := v.getSecretLocked(key); err != nil {
-		if v.isNotFoundErr(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-func (v *ExternalVaultProvider) hasSecretViaExistsCmd(key string) (bool, error) {
-	cmd, err := v.renderCmdTemplate(v.cfg.Exists.CommandTemplate, key)
+	reg, err := v.loadRegistry()
 	if err != nil {
-		return false, fmt.Errorf("failed to render exists cmd: %w", err)
-	}
-
-	var input string
-	if v.cfg.Exists.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Exists.InputTemplate, key)
-		if err != nil {
-			return false, fmt.Errorf("failed to render input template: %w", err)
-		}
-	}
-
-	if _, err = v.executeCommand(cmd, input); err == nil {
-		return true, nil
-	}
-
-	// A non-zero exit conventionally means "absent", but it is also how an expired
-	// session, a network failure, or a permissions problem surfaces. NotFoundPattern
-	// lets a config say which failures actually mean absence.
-	//
-	// It can only say so about failures that produce a message, though. An exists
-	// command may answer purely by exit status -- `test -f`, `jq -e` -- and then
-	// there is no text for the pattern to match. Treating that as "the pattern did
-	// not match, so this is a real error" turns every ordinary miss into a failure,
-	// so a silent non-zero exit is taken at its word: absent.
-	var cmdErr *commandError
-	if errors.As(err, &cmdErr) && cmdErr.diagnostics() == "" {
-		return false, nil
-	}
-
-	if v.cfg.NotFoundPattern != "" && !strings.Contains(err.Error(), v.cfg.NotFoundPattern) {
 		return false, err
 	}
-	return false, nil
+
+	_, ok := reg.Links[key]
+	return ok, nil
 }
 
 func (v *ExternalVaultProvider) isNotFoundErr(err error) bool {
@@ -363,14 +270,14 @@ func (v *ExternalVaultProvider) Metadata() (Metadata, error) {
 		return Metadata{}, nil
 	}
 
-	cmd, err := v.renderCmdTemplate(v.cfg.Metadata.CommandTemplate, "")
+	cmd, err := v.renderCmdTemplate(v.cfg.Metadata.CommandTemplate, "", "")
 	if err != nil {
 		return Metadata{}, fmt.Errorf("failed to render metadata cmd: %w", err)
 	}
 
 	var input string
 	if v.cfg.Metadata.InputTemplate != "" {
-		input, err = v.renderInputTemplate(v.cfg.Metadata.InputTemplate, "")
+		input, err = v.renderInputTemplate(v.cfg.Metadata.InputTemplate, "", "")
 		if err != nil {
 			return Metadata{}, fmt.Errorf("failed to render input template: %w", err)
 		}
@@ -444,13 +351,19 @@ func (v *ExternalVaultProvider) environmentToSlice() []string {
 }
 
 // templateData is the variable set shared by the command and input templates.
-// The secret value is intentionally absent; only renderInputTemplateWithValue
-// adds it.
-func (v *ExternalVaultProvider) templateData(key string) map[string]interface{} {
+//
+// {{ ref }} is what a provider command should use: it is the reference the
+// backend understands. {{ key }} is the local alias, kept available because a
+// template may want it for a message, and because it was the only variable
+// before references existed. {{ id }} and {{ name }} remain aliases of {{ key }}
+// for compatibility.
+//
+// No secret value is exposed. There is no longer any operation that has one.
+func (v *ExternalVaultProvider) templateData(key, reference string) map[string]interface{} {
 	return map[string]interface{}{
 		"env":  expandEnv(v.cfg.Environment),
+		"ref":  reference,
 		"key":  key,
-		"ref":  key,
 		"id":   key,
 		"name": key,
 	}
@@ -475,19 +388,13 @@ func (v *ExternalVaultProvider) render(name, template string, data map[string]in
 	return result, nil
 }
 
-func (v *ExternalVaultProvider) renderCmdTemplate(template, key string) (string, error) {
-	return v.render("args", template, v.templateData(key))
+func (v *ExternalVaultProvider) renderCmdTemplate(template, key, reference string) (string, error) {
+	return v.render("args", template, v.templateData(key, reference))
 }
 
-func (v *ExternalVaultProvider) renderInputTemplate(template, input string) (string, error) {
-	return v.renderInputTemplateWithValue(template, input, "")
-}
-
-func (v *ExternalVaultProvider) renderInputTemplateWithValue(template, input, value string) (string, error) {
-	data := v.templateData(input)
-	data["input"] = input
-	data["value"] = value
-	data["password"] = value
+func (v *ExternalVaultProvider) renderInputTemplate(template, key, reference string) (string, error) {
+	data := v.templateData(key, reference)
+	data["input"] = key
 	return v.render("input", template, data)
 }
 

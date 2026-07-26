@@ -2,12 +2,23 @@
 
 This directory contains ready-to-use configurations for popular CLI tools.
 
+An external vault **reads through** to the tool that owns your secrets. It holds
+a set of links — a key you choose, paired with a reference that tool understands —
+and resolves them on demand. It never writes to the provider, so pointing one at
+a store you already use cannot damage it.
+
 ## Available Configurations
 
-- **[Bitwarden](./providers/bitwarden.json)**
-- **[1Password](./providers/1password.json)**
-- **[pass](./providers/pass.json)**
-- **[AWS SSM Parameter Store](./providers/aws-ssm.json)**
+| Provider | Reference looks like |
+|----------|----------------------|
+| **[1Password](./providers/1password.json)** | `op://Team/AWS/access_key_id` |
+| **[pass](./providers/pass.json)** | `team/db/password` |
+| **[AWS SSM Parameter Store](./providers/aws-ssm.json)** | `/prod/db/password` |
+| **[Bitwarden](./providers/bitwarden.json)** | an item ID |
+
+Note the field on the end of the 1Password reference. One item's several
+credentials are addressed individually, so an `AWS` item holding both an access
+key and a secret key yields two links rather than one unreachable pair.
 
 ## Quick Start
 
@@ -17,8 +28,8 @@ go run main.go providers/pass.json
 ```
 
 These configurations are covered by `TestShippedExampleProvidersAreUsable`, which
-loads each one, renders every operation, and asserts that the secret value reaches
-the backend over stdin and never appears in a command string.
+loads each one, supplies a realistic reference, and asserts the rendered command
+addresses that reference rather than the local key.
 
 ## Setup Instructions
 
@@ -27,8 +38,10 @@ the backend over stdin and never appears in a command string.
 Each tool requires prior authentication:
 
 - **Bitwarden**: `bw login && bw unlock`
-- **1Password**: `op signin`
-- **AWS SSM**: `aws configure`
+- **1Password**: enable "Integrate with 1Password CLI" in the app, or set
+  `OP_SERVICE_ACCOUNT_TOKEN`. A session from `op signin` in a terminal is not
+  visible to other applications.
+- **AWS SSM**: `aws configure` or `aws sso login`
 - **pass**: Configure GPG keys
 
 ### Environment Variables
@@ -36,7 +49,7 @@ Each tool requires prior authentication:
 | Provider | Required Variables |
 |----------|-------------------|
 | Bitwarden | `BW_SESSION` |
-| 1Password | `OP_SERVICE_ACCOUNT_TOKEN` |
+| 1Password | `OP_SERVICE_ACCOUNT_TOKEN` (only for service accounts) |
 | AWS SSM | `AWS_REGION` (+ credentials) |
 | pass | `PASSWORD_STORE_DIR` (optional) |
 
@@ -47,29 +60,17 @@ Each configuration follows this pattern:
 ```json
 {
   "id": "provider-name",
-  "type": "external", 
+  "type": "external",
   "external": {
-    "cmd": "cli-command",
     "get": {
-      "cmd": "subcommand {{key}}",
+      "cmd": "read-subcommand '{{ref}}'",
       "output": "{{output}}"
-    },
-    "set": {
-      "cmd": "subcommand {{key}}",
-      "input": "{{value}}"
-    },
-    "list": {
-      "cmd": "list-subcommand"
-    },
-    "delete": {
-      "cmd": "delete-subcommand {{key}}"
-    },
-    "exists": {
-      "cmd": "check-subcommand {{key}}"
     },
     "metadata": {
       "cmd": "status-subcommand"
     },
+    "reference_pattern": "^expected/shape/.*$",
+    "not_found_pattern": "NoSuchSecret",
     "environment": {
       "ENV_VAR": "$ENV_VAR"
     },
@@ -78,32 +79,52 @@ Each configuration follows this pattern:
 }
 ```
 
+`storage_path` — where the link registry is kept — is deliberately absent from
+these files. A configuration authored for distribution does not know where the
+consuming tool keeps vault state, so the tool fills it in before opening the
+vault.
+
+`reference_pattern` describes what a reference for this provider looks like. It
+is a usability gate: it catches a mistyped reference when you link it instead of
+when you read it.
+
+`not_found_pattern` separates "this link is broken" from "the provider is
+unreachable". Without it, an expired session is indistinguishable from a deleted
+secret.
+
 ## Template Variables
 
 In `cmd` fields:
 
-- `{{key}}` - The secret key/name (also available as `ref`, `id`, `name`)
-- `{{env["VariableName"]}}`- Environment variable value
-
-In `input` fields (piped to the command's stdin):
-
-- `{{value}}` - The secret value, on `set` only
-- `{{input}}` - The secret key
-- `{{env["VariableName"]}}`
+- `{{ref}}` — the reference this key is linked to. **This is what a provider
+  command should use.**
+- `{{key}}` — the local alias (also available as `id`, `name`)
+- `{{env["VariableName"]}}` — environment variable value
 
 In `output` fields:
 
-- `{{output}}` - Raw command output
+- `{{output}}` — raw command output
 
-### The secret value is never available to a `cmd` template
+Shell syntax in a `cmd` works normally: `$VAR`, `${VAR:-default}` and `$(...)`
+are resolved by the interpreter, with the configured `environment` in scope.
 
-A rendered command is parsed and executed by a shell, and the template engine
-performs no quoting. Interpolating a secret there is a command-injection sink and
-silently corrupts any value containing shell metacharacters -- `p@$$w0rd` has `$$`
-expanded to the process ID, and `correct horse battery` word-splits to `correct`.
+### There is no `set`, `delete`, `list` or `exists`
 
-Configurations that reference `{{value}}` or `{{password}}` in any `cmd` are
-rejected at load. Pass the secret over stdin with an `input` template instead.
+Those commands existed when an external vault was a writable store, and they are
+now inert — a configuration carrying them still loads, and they are never run.
 
-Shell syntax in a `cmd` works normally: `$VAR`, `${VAR:-default}` and `$(...)` are
-resolved by the interpreter, with the configured `environment` in scope.
+Writing through to a provider meant either interpolating the secret into a shell
+command (which silently corrupts any value with shell metacharacters — `p@$$w0rd`
+has `$$` expanded to the process ID) or handing it to a CLI as an argv element,
+where every process on the machine can see it. 1Password's own documentation
+warns about exactly this. It also meant a `delete` that destroyed real data.
+
+So: create secrets in the tool that owns them, then link them. Removing a link
+removes only the link.
+
+### References are validated before they reach a shell
+
+Quotes, backticks, `$`, backslashes, control characters, a leading dash and `..`
+path segments are all rejected — on the way in *and* again on the way out, since
+the registry is a file that can be hand-edited. `reference_pattern` is applied on
+top of that floor, never instead of it.

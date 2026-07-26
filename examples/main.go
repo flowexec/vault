@@ -22,13 +22,17 @@ func printMetadata(provider vault.Provider) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <provider-config.json>")
-		fmt.Println("Example: go run main.go providers/bitwarden.json")
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: go run main.go <provider-config.json> <reference>")
+		fmt.Println("Example: go run main.go providers/pass.json team/db/password")
+		fmt.Println()
+		fmt.Println("The reference is a path in the provider's own namespace, pointing at a")
+		fmt.Println("secret that already exists. Nothing is created or modified.")
 		fmt.Println()
 		listProviders()
 		os.Exit(1)
 	}
+	reference := os.Args[2]
 
 	configPath := filepath.Clean(os.Args[1])
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -52,6 +56,18 @@ func main() {
 	}
 	fmt.Println()
 
+	// A distributed config does not know where the consuming tool keeps vault
+	// state, so it carries no storage path. Here that is a throwaway directory:
+	// the registry is the only thing this example writes anywhere.
+	if config.External.StoragePath == "" {
+		dir, err := os.MkdirTemp("", "vault-example-*")
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		config.External.StoragePath = dir
+	}
+
 	provider, _, err := vault.New(config.ID,
 		vault.WithProvider(vault.ProviderTypeExternal),
 		vault.WithExternalConfig(config.External),
@@ -59,56 +75,61 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	fmt.Printf("Using vault provider: %s\n", provider.ID())
 
-	fmt.Println("Setting test secret...")
-	testSecret := vault.NewSecretValue([]byte("test-secret-value-123"))
-	err = provider.SetSecret("test-key", testSecret)
-	if err != nil {
-		log.Fatalf("%v", err)
-	} else {
-		fmt.Println("Secret set successfully")
+	// Link management is a capability of read-through vaults specifically, so it
+	// lives on its own interface rather than on Provider.
+	links, ok := provider.(vault.ReferenceVault)
+	if !ok {
+		log.Fatalf("provider %s does not support links", provider.ID())
 	}
 
-	fmt.Println("Checking if secret exists...")
+	fmt.Printf("Linking 'test-key' to %s...\n", reference)
+	if err := links.Link("test-key", reference); err != nil {
+		log.Fatalf("%v", err)
+	}
+	fmt.Println("Linked")
+
+	fmt.Println("Checking if the key is linked...")
 	exists, err := provider.HasSecret("test-key")
 	if err != nil {
 		log.Fatalf("%v", err)
-	} else {
-		fmt.Printf("Secret exists: %t\n", exists)
 	}
+	fmt.Printf("Linked: %t\n", exists)
 
-	fmt.Println("Retrieving secret...")
+	fmt.Println("Reading through to the provider...")
 	retrievedSecret, err := provider.GetSecret("test-key")
 	if err != nil {
 		log.Fatalf("%v", err)
-	} else {
-		fmt.Printf("Retrieved secret: %s\n", retrievedSecret.String())
-		fmt.Printf("Secret length: %d characters\n", len(retrievedSecret.PlainTextString()))
 	}
+	fmt.Printf("Retrieved secret: %s\n", retrievedSecret.String())
+	fmt.Printf("Secret length: %d characters\n", len(retrievedSecret.PlainTextString()))
 
-	fmt.Println("Listing all secrets...")
+	fmt.Println("Listing linked keys...")
 	secrets, err := provider.ListSecrets()
 	if err != nil {
 		log.Fatalf("%v", err)
-	} else {
-		fmt.Printf("Found %d secrets:\n", len(secrets))
-		for i, secret := range secrets {
-			fmt.Printf("  %d. %s\n", i+1, secret)
+	}
+	fmt.Printf("Found %d links:\n", len(secrets))
+	for i, secret := range secrets {
+		ref, refErr := links.Reference(secret)
+		if refErr != nil {
+			ref = fmt.Sprintf("<unresolvable: %v>", refErr)
 		}
+		fmt.Printf("  %d. %s -> %s\n", i+1, secret, ref)
 	}
 
 	printMetadata(provider)
 
-	fmt.Println("Cleaning up test secret...")
-	err = provider.DeleteSecret("test-key")
-	if err != nil {
+	// Removes the link only. The secret in the provider is untouched -- that is
+	// the point of the read-through design.
+	fmt.Println("Unlinking test key...")
+	if err := links.Unlink("test-key"); err != nil {
 		log.Fatalf("%v", err)
-	} else {
-		fmt.Println("Test secret deleted successfully")
 	}
+	fmt.Println("Unlinked (the secret itself was not modified)")
 
 	fmt.Println("Testing completed successfully")
 }

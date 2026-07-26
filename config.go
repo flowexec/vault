@@ -202,21 +202,52 @@ type CommandConfig struct {
 	InputTemplate string `json:"input,omitempty"`
 }
 
-// ExternalConfig contains external (cli command-based) vault configuration
+// SourceRef records which generator produced a configuration. The library never
+// interprets it; it exists so a tool that renders configs from presets can
+// recognise its own output later and re-run preset-specific work (a readiness
+// check, a discovery browse) against an already-created vault.
+type SourceRef struct {
+	Name   string            `json:"name"`
+	Values map[string]string `json:"values,omitempty"`
+}
+
+// ExternalConfig contains external (cli command-based) vault configuration.
+//
+// An external vault is a read-through registry, not a store. It holds a set of
+// links -- an alias paired with a reference the provider's CLI understands, such
+// as an op:// URI, a pass entry path or an SSM parameter name -- and resolves
+// them by running Get. It never writes secret material anywhere.
+//
+// That is why there is only a get command here. Writing through to a provider
+// meant either interpolating the secret into a shell command or handing it to a
+// CLI as an argv element, and it meant a delete that destroyed real data. Both
+// are gone: a secret is created in the tool that owns it, and removing a link
+// removes only the link.
 type ExternalConfig struct {
-	// Get CommandConfig for the get operation
+	// Get resolves a reference to a secret value. Its command template receives
+	// {{ ref }} (the reference) and {{ key }} (the alias).
 	Get CommandConfig `json:"get,omitempty"`
-	// Set CommandConfig for the set operation
-	Set CommandConfig `json:"set,omitempty"`
-	// Delete CommandConfig for the delete operation
-	Delete CommandConfig `json:"delete,omitempty"`
-	// List CommandConfig for the list operation
-	List          CommandConfig `json:"list,omitempty"`
-	ListSeparator string        `json:"separator,omitempty"`
-	// Exists CommandConfig for the exists operation
-	Exists CommandConfig `json:"exists,omitempty"`
 	// Metadata CommandConfig for the metadata operation
 	Metadata CommandConfig `json:"metadata,omitempty"`
+
+	// StoragePath is the directory holding this vault's link registry.
+	//
+	// Not required by Validate: a config authored by hand or rendered from a
+	// preset does not know where the consuming tool keeps vault state, so the
+	// tool fills this in before constructing the provider. It is required at
+	// construction, where a missing value is a real error rather than a
+	// half-configured file on disk.
+	StoragePath string `json:"storage_path,omitempty"`
+
+	// ReferencePattern constrains what a reference may look like for this
+	// provider, as a regular expression. It is a usability gate that catches a
+	// mistyped reference at link time rather than at read time; the safety rules
+	// in validateReference apply regardless of what it permits.
+	ReferencePattern string `json:"reference_pattern,omitempty"`
+
+	// Source records which preset generated this config, for the generator's own
+	// use. Opaque to the library.
+	Source *SourceRef `json:"source,omitempty"`
 
 	// Environment variables for commands
 	Environment map[string]string `json:"environment,omitempty"`
@@ -232,6 +263,37 @@ type ExternalConfig struct {
 	// a network error, a permissions problem). Without it, any non-zero exit is
 	// read as absence. Example: "ParameterNotFound".
 	NotFoundPattern string `json:"not_found_pattern,omitempty"`
+
+	// Legacy write-era fields. Parsed so a pre-v0.4.0 config still unmarshals
+	// instead of failing at load, and reported as inert by Validate. Set and
+	// Delete are never executed. List is read by MigrateLegacyLinks, which is the
+	// one place a legacy config still has something useful to say: it can name
+	// the keys that used to exist so they can be seeded as links.
+	LegacySet           CommandConfig `json:"set,omitempty"`
+	LegacyDelete        CommandConfig `json:"delete,omitempty"`
+	LegacyList          CommandConfig `json:"list,omitempty"`
+	LegacyListSeparator string        `json:"separator,omitempty"`
+	LegacyExists        CommandConfig `json:"exists,omitempty"`
+}
+
+// LegacyWriteCommands returns the names of the inert write-era commands present
+// in this config, so a caller can tell the user they are being ignored.
+func (c *ExternalConfig) LegacyWriteCommands() []string {
+	var found []string
+	for _, op := range []struct {
+		name string
+		tmpl string
+	}{
+		{"set", c.LegacySet.CommandTemplate},
+		{"delete", c.LegacyDelete.CommandTemplate},
+		{"list", c.LegacyList.CommandTemplate},
+		{"exists", c.LegacyExists.CommandTemplate},
+	} {
+		if op.tmpl != "" {
+			found = append(found, op.name)
+		}
+	}
+	return found
 }
 
 // timeoutDuration parses the configured timeout. An empty timeout means no limit.
@@ -250,26 +312,32 @@ func (c *ExternalConfig) timeoutDuration() (time.Duration, error) {
 var secretValueRefs = regexp.MustCompile(`{{[^}]*\b(value|password)\b[^}]*}}`)
 
 func (c *ExternalConfig) Validate() error {
-	if c.Get.CommandTemplate == "" || c.Set.CommandTemplate == "" {
-		return fmt.Errorf("%w: get and set args template required for external vault", ErrInvalidConfig)
+	if c.Get.CommandTemplate == "" {
+		return fmt.Errorf("%w: a get command template is required for an external vault", ErrInvalidConfig)
 	}
 
 	cmdTemplates := map[string]string{
 		"get":      c.Get.CommandTemplate,
-		"set":      c.Set.CommandTemplate,
-		"delete":   c.Delete.CommandTemplate,
-		"list":     c.List.CommandTemplate,
-		"exists":   c.Exists.CommandTemplate,
 		"metadata": c.Metadata.CommandTemplate,
 	}
 	for op, tmpl := range cmdTemplates {
+		// An external vault no longer carries secret material into a command, so
+		// this can only fire on a hand-written template. Keep the check: the
+		// rendered command is run by a shell with no quoting, and a template that
+		// still asks for the value would silently render it empty rather than
+		// failing, which is a worse outcome than a clear rejection.
 		if secretValueRefs.MatchString(tmpl) {
 			return fmt.Errorf(
-				"%w: the %s command template references the secret value, which is unsafe: "+
-					"the command is run by a shell and the value is not quoted. "+
-					`Move it to an input template instead, e.g. "input": "{{ value }}"`,
+				"%w: the %s command template references a secret value. External vaults are "+
+					"read-through and never receive one, so this can only render empty",
 				ErrInvalidConfig, op,
 			)
+		}
+	}
+
+	if c.ReferencePattern != "" {
+		if _, err := regexp.Compile(c.ReferencePattern); err != nil {
+			return fmt.Errorf("%w: invalid reference_pattern %q: %w", ErrInvalidConfig, c.ReferencePattern, err)
 		}
 	}
 
