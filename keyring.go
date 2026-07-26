@@ -58,6 +58,20 @@ func (v *KeyringVault) namespaced(kind, key string) string {
 	return fmt.Sprintf("%d:%s:%s:%s", len(v.id), v.id, kind, key)
 }
 
+// legacyNamespaced reproduces the pre-v0.3.0 entry name.
+//
+// Renaming the entries fixed a real collision but made every secret in an
+// existing keyring vault unreachable: the data is still in the OS keyring, just
+// under the old name. Reads fall back to this, and the next write migrates the
+// entry, so an existing vault keeps working without the user re-entering
+// anything.
+func (v *KeyringVault) legacyNamespaced(kind, key string) string {
+	if key == "" {
+		return fmt.Sprintf("%s-%s", v.id, kind)
+	}
+	return fmt.Sprintf("%s-%s-%s", v.id, kind, key)
+}
+
 func (v *KeyringVault) metadataKey() string {
 	return v.namespaced("metadata", "")
 }
@@ -68,6 +82,48 @@ func (v *KeyringVault) secretKey(key string) string {
 
 func (v *KeyringVault) secretsListKey() string {
 	return v.namespaced("secrets-list", "")
+}
+
+// get reads an entry, falling back to the pre-v0.3.0 name. The returned bool
+// reports whether the value came from a legacy entry and so needs migrating.
+func (v *KeyringVault) get(kind, key string) (string, bool, error) {
+	data, err := keyring.Get(v.service, v.namespaced(kind, key))
+	if err == nil {
+		return data, false, nil
+	}
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return "", false, err
+	}
+
+	data, legacyErr := keyring.Get(v.service, v.legacyNamespaced(kind, key))
+	if legacyErr != nil {
+		// Report the miss against the current name; the legacy lookup is an
+		// implementation detail and its error would only confuse.
+		return "", false, err
+	}
+	return data, true, nil
+}
+
+// set writes an entry under the current name and removes any legacy entry it
+// supersedes, so the rename completes on first write rather than leaving two
+// copies of a secret in the keyring.
+func (v *KeyringVault) set(kind, key, value string) error {
+	if err := keyring.Set(v.service, v.namespaced(kind, key), value); err != nil {
+		return err
+	}
+	_ = keyring.Delete(v.service, v.legacyNamespaced(kind, key))
+	return nil
+}
+
+// remove deletes both the current and legacy entries so a delete cannot leave
+// the old copy behind to reappear on the next read.
+func (v *KeyringVault) remove(kind, key string) error {
+	err := keyring.Delete(v.service, v.namespaced(kind, key))
+	legacyErr := keyring.Delete(v.service, v.legacyNamespaced(kind, key))
+	if err != nil && errors.Is(err, keyring.ErrNotFound) && legacyErr == nil {
+		return nil
+	}
+	return err
 }
 
 func (v *KeyringVault) initMetadata() error {
@@ -81,7 +137,7 @@ func (v *KeyringVault) initMetadata() error {
 }
 
 func (v *KeyringVault) loadMetadata() error {
-	data, err := keyring.Get(v.service, v.metadataKey())
+	data, _, err := v.get("metadata", "")
 	if err != nil {
 		return err
 	}
@@ -103,11 +159,11 @@ func (v *KeyringVault) saveMetadata() error {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	return keyring.Set(v.service, v.metadataKey(), string(data))
+	return v.set("metadata", "", string(data))
 }
 
 func (v *KeyringVault) loadSecretsList() ([]string, error) {
-	data, err := keyring.Get(v.service, v.secretsListKey())
+	data, _, err := v.get("secrets-list", "")
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return []string{}, nil
@@ -129,7 +185,7 @@ func (v *KeyringVault) saveSecretsList(secrets []string) error {
 		return fmt.Errorf("failed to marshal secrets list: %w", err)
 	}
 
-	return keyring.Set(v.service, v.secretsListKey(), string(data))
+	return v.set("secrets-list", "", string(data))
 }
 
 func (v *KeyringVault) addSecretToList(key string) error {
@@ -187,7 +243,7 @@ func (v *KeyringVault) GetSecret(key string) (Secret, error) {
 		return nil, err
 	}
 
-	data, err := keyring.Get(v.service, v.secretKey(key))
+	data, _, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return nil, ErrSecretNotFound
@@ -206,7 +262,7 @@ func (v *KeyringVault) SetSecret(key string, secret Secret) error {
 		return err
 	}
 
-	if err := keyring.Set(v.service, v.secretKey(key), secret.PlainTextString()); err != nil {
+	if err := v.set("secret", key, secret.PlainTextString()); err != nil {
 		return fmt.Errorf("failed to set secret in keyring: %w", err)
 	}
 
@@ -226,7 +282,7 @@ func (v *KeyringVault) DeleteSecret(key string) error {
 	}
 
 	// Check if secret exists first
-	_, err := keyring.Get(v.service, v.secretKey(key))
+	_, _, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return ErrSecretNotFound
@@ -234,7 +290,7 @@ func (v *KeyringVault) DeleteSecret(key string) error {
 		return fmt.Errorf("failed to check secret existence: %w", err)
 	}
 
-	if err := keyring.Delete(v.service, v.secretKey(key)); err != nil {
+	if err := v.remove("secret", key); err != nil {
 		return fmt.Errorf("failed to delete secret from keyring: %w", err)
 	}
 
@@ -269,7 +325,7 @@ func (v *KeyringVault) HasSecret(key string) (bool, error) {
 		return false, err
 	}
 
-	_, err := keyring.Get(v.service, v.secretKey(key))
+	_, _, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return false, nil

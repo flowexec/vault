@@ -375,3 +375,134 @@ func TestKeyringVault_SortedOutput(t *testing.T) {
 		}
 	}
 }
+
+// Renaming keyring entries in v0.3.0 fixed a real collision, but the data for
+// every existing keyring vault is still stored under the old names. Without a
+// fallback, upgrading silently makes every secret look deleted -- the keyring
+// still holds it, the vault just looks in the wrong place.
+func TestKeyringVault_ReadsPreV030EntryNames(t *testing.T) {
+	keyring.MockInit()
+
+	const (
+		vaultID = "legacy-vault"
+		key     = "api-key"
+		value   = "legacy-secret-value"
+	)
+
+	// Seed the keyring exactly as a pre-v0.3.0 vault would have left it.
+	if err := keyring.Set(testKeyringService, vaultID+"-secret-"+key, value); err != nil {
+		t.Fatalf("failed to seed legacy secret: %v", err)
+	}
+	if err := keyring.Set(testKeyringService, vaultID+"-secrets-list", `["`+key+`"]`); err != nil {
+		t.Fatalf("failed to seed legacy secrets list: %v", err)
+	}
+	if err := keyring.Set(testKeyringService, vaultID+"-metadata", `{"created":"2024-01-01T00:00:00Z"}`); err != nil {
+		t.Fatalf("failed to seed legacy metadata: %v", err)
+	}
+
+	vlt, _, err := vault.New(vaultID,
+		vault.WithProvider(vault.ProviderTypeKeyring),
+		vault.WithKeyringService(testKeyringService),
+	)
+	if err != nil {
+		t.Fatalf("Failed to open a pre-v0.3.0 keyring vault: %v", err)
+	}
+	defer vlt.Close()
+
+	secret, err := vlt.GetSecret(key)
+	if err != nil {
+		t.Fatalf("GetSecret() on a legacy entry = %v, want the stored value", err)
+	}
+	if got := secret.PlainTextString(); got != value {
+		t.Errorf("GetSecret() = %q, want %q", got, value)
+	}
+
+	exists, err := vlt.HasSecret(key)
+	if err != nil || !exists {
+		t.Errorf("HasSecret() = (%v, %v), want (true, nil)", exists, err)
+	}
+
+	keys, err := vlt.ListSecrets()
+	if err != nil {
+		t.Fatalf("ListSecrets() error = %v", err)
+	}
+	if len(keys) != 1 || keys[0] != key {
+		t.Errorf("ListSecrets() = %v, want [%s]", keys, key)
+	}
+}
+
+// Writing migrates the entry to the current name and drops the old one, so the
+// keyring does not end up holding two copies of the same secret.
+func TestKeyringVault_WriteMigratesLegacyEntry(t *testing.T) {
+	keyring.MockInit()
+
+	const (
+		vaultID = "legacy-vault"
+		key     = "api-key"
+	)
+
+	if err := keyring.Set(testKeyringService, vaultID+"-secret-"+key, "old-value"); err != nil {
+		t.Fatalf("failed to seed legacy secret: %v", err)
+	}
+
+	vlt, _, err := vault.New(vaultID,
+		vault.WithProvider(vault.ProviderTypeKeyring),
+		vault.WithKeyringService(testKeyringService),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create keyring vault: %v", err)
+	}
+	defer vlt.Close()
+
+	if err := vlt.SetSecret(key, vault.NewSecretValue([]byte("new-value"))); err != nil {
+		t.Fatalf("SetSecret() error = %v", err)
+	}
+
+	// The legacy entry must be gone, not left behind holding a stale secret.
+	if _, err := keyring.Get(testKeyringService, vaultID+"-secret-"+key); !errors.Is(err, keyring.ErrNotFound) {
+		t.Errorf("legacy entry still present after write: err = %v", err)
+	}
+
+	secret, err := vlt.GetSecret(key)
+	if err != nil {
+		t.Fatalf("GetSecret() error = %v", err)
+	}
+	if got := secret.PlainTextString(); got != "new-value" {
+		t.Errorf("GetSecret() = %q, want %q", got, "new-value")
+	}
+}
+
+// Deleting must clear both names, or the legacy copy reappears on the next read.
+func TestKeyringVault_DeleteRemovesLegacyEntry(t *testing.T) {
+	keyring.MockInit()
+
+	const (
+		vaultID = "legacy-vault"
+		key     = "api-key"
+	)
+
+	if err := keyring.Set(testKeyringService, vaultID+"-secret-"+key, "old-value"); err != nil {
+		t.Fatalf("failed to seed legacy secret: %v", err)
+	}
+
+	vlt, _, err := vault.New(vaultID,
+		vault.WithProvider(vault.ProviderTypeKeyring),
+		vault.WithKeyringService(testKeyringService),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create keyring vault: %v", err)
+	}
+	defer vlt.Close()
+
+	if err := vlt.DeleteSecret(key); err != nil {
+		t.Fatalf("DeleteSecret() error = %v", err)
+	}
+
+	exists, err := vlt.HasSecret(key)
+	if err != nil {
+		t.Fatalf("HasSecret() error = %v", err)
+	}
+	if exists {
+		t.Error("secret still readable after delete; the legacy entry survived")
+	}
+}
