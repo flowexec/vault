@@ -115,7 +115,7 @@ func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 			return nil, fmt.Errorf("failed to parse output: %w", err)
 		}
 	} else {
-		secretValue = strings.TrimSpace(output)
+		secretValue = trimCommandNewline(output)
 	}
 
 	return NewSecretValue([]byte(secretValue)), nil
@@ -547,7 +547,25 @@ func execute(ctx context.Context, cmd, input, dir string, envList []string) (str
 	// Only stdout is the result. Merging stderr in on success concatenates any
 	// warning the backend emits (e.g. "gpg: WARNING: unsafe permissions") onto
 	// the secret value itself. stderr is still returned on the error path above.
-	return strings.TrimSpace(stdOutBuffer.String()), nil
+	//
+	// Returned verbatim: trimming here would silently corrupt any secret with
+	// deliberate leading or trailing whitespace. Callers that want a tidy string
+	// (list, metadata) trim for themselves; GetSecret strips only the single
+	// trailing newline a command adds.
+	return stdOutBuffer.String(), nil
+}
+
+// trimCommandNewline removes the one trailing line ending a command conventionally
+// adds to its output, and nothing else.
+//
+// TrimSpace would take real data with it: a passphrase may legitimately begin or
+// end with a space, and a PEM block ends in a newline that some parsers require.
+// A secret whose true value ends in a newline is still indistinguishable from one
+// that does not -- that is inherent to reading a value off a command's stdout,
+// and no amount of trimming policy can recover it.
+func trimCommandNewline(s string) string {
+	s = strings.TrimSuffix(s, "\n")
+	return strings.TrimSuffix(s, "\r")
 }
 
 // expandEnv returns a new map with environment references expanded. It must not
