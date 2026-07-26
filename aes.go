@@ -42,13 +42,22 @@ func GenerateEncryptionKey() (string, error) {
 	return crypto.GenerateKey()
 }
 
-// DeriveEncryptionKey derives an AES encryption key from a passphrase
+// DeriveEncryptionKey derives an AES encryption key from a passphrase.
+//
+// An empty sal requests a freshly generated salt. Pass the returned salt back
+// verbatim to re-derive the same key; it carries the parameters it was made
+// with, so future changes to the defaults cannot alter an existing key.
 func DeriveEncryptionKey(passphrase, sal string) (string, string, error) {
-	key, salt, err := crypto.DeriveKey([]byte(passphrase), []byte(sal))
+	var salt []byte
+	if sal != "" {
+		salt = []byte(sal)
+	}
+
+	key, salt2, err := crypto.DeriveKey([]byte(passphrase), salt)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to derive encryption key: %w", err)
 	}
-	return key, salt, nil
+	return key, salt2, nil
 }
 
 // ValidateEncryptionKey checks if a key is valid by attempting to encrypt/decrypt test data
