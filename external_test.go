@@ -419,9 +419,14 @@ func TestHasSecret_NotFoundPatternDistinguishesRealFailures(t *testing.T) {
 	cfg.Exists.CommandTemplate = "check {{key}}"
 	cfg.NotFoundPattern = "ParameterNotFound"
 
+	// execute() reports a generic "exited with non-zero status" error and returns
+	// the backend's own message as the command output, so these mocks put the
+	// diagnostic where the real executor puts it. A mock that instead encodes it
+	// in the error would be testing a shape that cannot occur.
 	t.Run("absent", func(t *testing.T) {
 		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{}, "", fmt.Errorf("ParameterNotFound: nope")))
+		provider.SetExecutionFunc(capturingExec(&execCapture{},
+			"ParameterNotFound: nope", fmt.Errorf("exit status 1")))
 
 		exists, err := provider.HasSecret("k")
 		if err != nil {
@@ -434,7 +439,8 @@ func TestHasSecret_NotFoundPatternDistinguishesRealFailures(t *testing.T) {
 
 	t.Run("real failure surfaces", func(t *testing.T) {
 		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{}, "", fmt.Errorf("ExpiredToken: session expired")))
+		provider.SetExecutionFunc(capturingExec(&execCapture{},
+			"ExpiredToken: session expired", fmt.Errorf("exit status 254")))
 
 		if _, err := provider.HasSecret("k"); err == nil {
 			t.Error("HasSecret() error = nil, want the expired-session error to surface")
@@ -633,5 +639,55 @@ func TestConcurrentGetSecretDoesNotRaceOnEnvironment(t *testing.T) {
 	// The config map itself must be unchanged: expansion returns a new map.
 	if got := cfg.Environment["LITERAL"]; got != "$(tty)" {
 		t.Errorf("config Environment was mutated: LITERAL = %q, want %q", got, "$(tty)")
+	}
+}
+
+// An exists command may answer purely by exit status -- `test -f`, `jq -e` --
+// leaving no message for NotFoundPattern to match. Treating that as "the
+// pattern did not match, so this is a real error" turned every ordinary miss
+// into a failure. Found by driving the pass preset against a real store.
+func TestHasSecret_SilentNonZeroExitMeansAbsent(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "test -f /nonexistent/{{key}}"
+	cfg.NotFoundPattern = "is not in the password store"
+
+	provider := newTestProvider(t, cfg)
+
+	exists, err := provider.HasSecret("missing")
+	if err != nil {
+		t.Fatalf("HasSecret() on a silent non-zero exit = %v, want a plain false", err)
+	}
+	if exists {
+		t.Error("HasSecret() = true, want false")
+	}
+}
+
+// A command that *does* complain still gets its message checked, so an expired
+// session is not silently reported as "the secret does not exist".
+func TestHasSecret_DiagnosticNotMatchingPatternSurfaces(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "echo 'ExpiredToken: session expired' 1>&2; exit 1"
+	cfg.NotFoundPattern = "ParameterNotFound"
+
+	provider := newTestProvider(t, cfg)
+
+	if _, err := provider.HasSecret("k"); err == nil {
+		t.Error("HasSecret() error = nil, want the expired-session failure to surface")
+	}
+}
+
+func TestHasSecret_DiagnosticMatchingPatternMeansAbsent(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "echo 'ParameterNotFound: nope' 1>&2; exit 1"
+	cfg.NotFoundPattern = "ParameterNotFound"
+
+	provider := newTestProvider(t, cfg)
+
+	exists, err := provider.HasSecret("k")
+	if err != nil {
+		t.Fatalf("HasSecret() = %v, want a plain false", err)
+	}
+	if exists {
+		t.Error("HasSecret() = true, want false")
 	}
 }
