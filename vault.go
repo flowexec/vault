@@ -34,24 +34,43 @@ func New(id string, opts ...Option) (Provider, *Config, error) {
 		return nil, config, err
 	}
 
+	// Each branch returns an explicit nil on error. Returning the typed pointer
+	// directly wrapped a nil *AgeVault (etc.) in a non-nil Provider interface,
+	// so the usual `if provider != nil` check passed and the next method call
+	// panicked on a nil receiver.
 	switch config.Type {
 	case ProviderTypeAge:
 		provider, err := NewAgeVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeAES256:
 		provider, err := NewAES256Vault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeKeyring:
 		provider, err := NewKeyringVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeUnencrypted:
 		provider, err := NewUnencryptedVault(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	case ProviderTypeExternal:
 		provider, err := NewExternalVaultProvider(config)
-		return provider, config, err
+		if err != nil {
+			return nil, config, err
+		}
+		return provider, config, nil
 	}
-	return nil, nil, fmt.Errorf("unsupported vault type: %s", config.Type)
+	return nil, config, fmt.Errorf("%w: unsupported vault type: %s", ErrInvalidConfig, config.Type)
 }
 
 // WithProvider sets the vault provider type

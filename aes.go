@@ -2,7 +2,6 @@ package vault
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -85,10 +84,14 @@ func NewAES256Vault(cfg *Config) (*AES256Vault, error) {
 		return nil, fmt.Errorf("AES configuration is required")
 	}
 
-	path := filepath.Join(
-		filepath.Clean(cfg.Aes.StoragePath),
-		filepath.Clean(fmt.Sprintf("%s-%s.%s", vaultFileBase, cfg.ID, aesVaultFileExt)),
-	)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	path, err := resolveVaultPath(cfg.Aes.StoragePath, cfg.ID, aesVaultFileExt)
+	if err != nil {
+		return nil, err
+	}
 
 	vault := &AES256Vault{
 		id:       cfg.ID,

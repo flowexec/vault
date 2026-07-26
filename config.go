@@ -30,8 +30,10 @@ type Config struct {
 }
 
 func (c *Config) Validate() error {
-	if c.ID == "" {
-		return fmt.Errorf("%w: vault ID is required", ErrInvalidConfig)
+	// The ID becomes part of a filename and of keyring entry names, so it needs
+	// a real charset check, not just a non-empty check.
+	if err := ValidateVaultID(c.ID); err != nil {
+		return err
 	}
 
 	switch c.Type {

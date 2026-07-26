@@ -3,7 +3,6 @@ package vault
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -37,10 +36,14 @@ func NewUnencryptedVault(cfg *Config) (*UnencryptedVault, error) {
 		return nil, fmt.Errorf("unencrypted configuration is required")
 	}
 
-	path := filepath.Join(
-		filepath.Clean(cfg.Unencrypted.StoragePath),
-		filepath.Clean(fmt.Sprintf("%s-%s.%s", vaultFileBase, cfg.ID, unencryptedVaultFileExt)),
-	)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	path, err := resolveVaultPath(cfg.Unencrypted.StoragePath, cfg.ID, unencryptedVaultFileExt)
+	if err != nil {
+		return nil, err
+	}
 
 	vault := &UnencryptedVault{
 		id:       cfg.ID,

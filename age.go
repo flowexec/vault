@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -46,10 +45,14 @@ func NewAgeVault(cfg *Config) (*AgeVault, error) {
 		return nil, fmt.Errorf("age configuration is required")
 	}
 
-	path := filepath.Join(
-		filepath.Clean(cfg.Age.StoragePath),
-		filepath.Clean(fmt.Sprintf("%s-%s.%s", vaultFileBase, cfg.ID, ageVaultFileExt)),
-	)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	path, err := resolveVaultPath(cfg.Age.StoragePath, cfg.ID, ageVaultFileExt)
+	if err != nil {
+		return nil, err
+	}
 
 	vault := &AgeVault{
 		mu:       sync.RWMutex{},

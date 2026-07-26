@@ -25,13 +25,22 @@ func NewKeyringVault(cfg *Config) (*KeyringVault, error) {
 		return nil, fmt.Errorf("keyring configuration is required")
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	vault := &KeyringVault{
 		id:      cfg.ID,
 		service: cfg.Keyring.Service,
 	}
 
-	// Try to load metadata or initialize if not exists
+	// Only a genuinely absent record means "new vault". Treating every error as
+	// absence meant a locked keychain, a DBus failure or a dismissed prompt made
+	// initMetadata() write a fresh record over the real Created timestamp.
 	if err := vault.loadMetadata(); err != nil {
+		if !errors.Is(err, keyring.ErrNotFound) {
+			return nil, fmt.Errorf("failed to read keyring vault metadata: %w", err)
+		}
 		if err := vault.initMetadata(); err != nil {
 			return nil, fmt.Errorf("failed to initialize keyring vault metadata: %w", err)
 		}
@@ -40,16 +49,25 @@ func NewKeyringVault(cfg *Config) (*KeyringVault, error) {
 	return vault, nil
 }
 
+// Keyring entry names are a flat namespace shared by every vault using the same
+// service, so the components are length-prefixed to make them unambiguous.
+// Plain "%s-secret-%s" collided: vault "a" with key "b-secret-c" and vault
+// "a-secret-b" with key "c" both produced "a-secret-b-secret-c", letting one
+// vault silently read, overwrite or delete another's secret.
+func (v *KeyringVault) namespaced(kind, key string) string {
+	return fmt.Sprintf("%d:%s:%s:%s", len(v.id), v.id, kind, key)
+}
+
 func (v *KeyringVault) metadataKey() string {
-	return fmt.Sprintf("%s-metadata", v.id)
+	return v.namespaced("metadata", "")
 }
 
 func (v *KeyringVault) secretKey(key string) string {
-	return fmt.Sprintf("%s-secret-%s", v.id, key)
+	return v.namespaced("secret", key)
 }
 
 func (v *KeyringVault) secretsListKey() string {
-	return fmt.Sprintf("%s-secrets-list", v.id)
+	return v.namespaced("secrets-list", "")
 }
 
 func (v *KeyringVault) initMetadata() error {

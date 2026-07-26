@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -22,6 +23,35 @@ const (
 	// vaultFileMode keeps the vault file owner-only.
 	vaultFileMode = 0600
 )
+
+// resolveVaultPath builds the on-disk path for a vault file and proves it stays
+// inside storagePath.
+//
+// filepath.Clean does not sanitize an ID embedded in a filename, it *resolves*
+// it: Clean("vault-../../../tmp/evil.enc") is "../tmp/evil.enc", because the
+// first ".." pops the literal "vault-.." element and the rest survive. Joining
+// that onto the storage directory escapes it, so a crafted vault ID could make
+// save() overwrite an arbitrary file. IDs are validated, and the result is then
+// checked against the base directory as a belt-and-braces second gate.
+func resolveVaultPath(storagePath, id, ext string) (string, error) {
+	if err := ValidateVaultID(id); err != nil {
+		return "", err
+	}
+
+	base, err := expandPath(storagePath)
+	if err != nil {
+		return "", fmt.Errorf("invalid vault storage path %q: %w", storagePath, err)
+	}
+
+	full := filepath.Join(base, fmt.Sprintf("%s-%s.%s", vaultFileBase, id, ext))
+
+	rel, err := filepath.Rel(base, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", NewVaultPathError(full)
+	}
+
+	return full, nil
+}
 
 // readVaultFile reads a vault file from disk.
 //

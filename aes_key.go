@@ -26,21 +26,37 @@ func NewKeyResolver(sources []KeySource) *KeyResolver {
 
 func (r *KeyResolver) ResolveKeys() ([]string, error) {
 	var keys []string
+	var failures []string
 
 	for _, source := range r.sources {
 		switch source.Type {
 		case envSource:
 			if key := r.fromEnvironment(source.Name); key != "" {
 				keys = append(keys, key)
+			} else {
+				failures = append(failures, fmt.Sprintf("env %s: not set or empty", source.Name))
 			}
 		case fileSource:
-			if key, err := r.fromFile(source.Path); err == nil && key != "" {
+			// Errors here used to be discarded outright (`err == nil &&`), so a
+			// typo'd path, a permissions problem or a truncated key file all
+			// surfaced as the generic "no encryption keys found" -- or worse,
+			// silently fell through to a different source.
+			key, err := r.fromFile(source.Path)
+			switch {
+			case err != nil:
+				failures = append(failures, fmt.Sprintf("file %s: %v", source.Path, err))
+			case key == "":
+				failures = append(failures, fmt.Sprintf("file %s: is empty", source.Path))
+			default:
 				keys = append(keys, key)
 			}
 		}
 	}
 
 	if len(keys) == 0 {
+		if len(failures) > 0 {
+			return nil, fmt.Errorf("%w: no encryption keys found (%s)", ErrNoAccess, strings.Join(failures, "; "))
+		}
 		return nil, fmt.Errorf("%w: no encryption keys found", ErrNoAccess)
 	}
 
