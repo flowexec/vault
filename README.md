@@ -15,23 +15,6 @@ A flexible Go library for secure secret management with multiple backend provide
 - **Thread Safe**: Concurrent access protection with read/write mutexes
 - **Comprehensive API**: Full CRUD operations plus metadata and existence checks
 
-## Upgrading to v0.3.0
-
-v0.3.0 is a security and correctness release. It contains breaking changes, each
-of which replaces behaviour that failed silently:
-
-| Change | Why | What to do |
-|---|---|---|
-| `Provider.Metadata()` returns `(Metadata, error)` | Every failure previously returned an empty struct, so a broken command, a timeout and "not configured" were indistinguishable | Handle the new error |
-| External configs referencing `{{value}}`/`{{password}}` in a `cmd` are rejected | The value was interpolated into a shell command with no quoting — a command-injection sink that also corrupted ordinary passwords | Move the secret to an `InputTemplate` (stdin) |
-| An existing but zero-length vault file is an error | It was read as "no vault here", so the constructor initialized and immediately overwrote it, destroying every secret | Restore from backup, or delete the file to start fresh |
-| Operations on a closed vault return `ErrVaultClosed` | They dereferenced nil state and panicked | Nothing, unless you relied on the panic |
-| Vault IDs are charset-validated | An ID is interpolated into a filename, and `filepath.Clean` *resolves* traversal rather than sanitizing it | Use IDs matching `^[a-zA-Z0-9][a-zA-Z0-9-_.]*$` |
-| Encryption keys must be exactly 32 bytes | `aes.NewCipher` also accepts 16 and 24, silently downgrading an "AES256" vault to AES-128/192 | Regenerate short keys |
-| `DeriveKey` returns a parameter-tagged salt | Changing the scrypt cost would otherwise silently change every derived key | Pass the returned salt back verbatim rather than base64-decoding it first |
-
-Local vault files written by earlier versions are read without migration.
-
 ## Quick Start
 
 ```go
@@ -94,7 +77,7 @@ key, err := vault.GenerateEncryptionKey()
 Uses the [age encryption tool](https://age-encryption.org/) with public key cryptography.
 
 ```go
-provider, _, err := vault.New("my-vault", 
+provider, _, err := vault.New("my-vault",
     vault.WithProvider(vault.ProviderTypeAge),
     vault.WithAgePath("~/.config/flow/vaults"), // a directory, not a file
 )
@@ -123,7 +106,7 @@ Stores secrets in plain text JSON files.
 
 ```go
 provider, _, err := vault.New("my-vault",
-    vault.WithProvider(vault.ProviderTypeUnencrypted), 
+    vault.WithProvider(vault.ProviderTypeUnencrypted),
     vault.WithUnencryptedPath("~/.config/flow/vaults"), // a directory, not a file
 )
 ```
@@ -199,6 +182,6 @@ metadata, err := provider.Metadata()
 
 ```go
 // Load configuration from JSON
-config, err := vault.LoadConfigJSON("vault-config.json") 
+config, err := vault.LoadConfigJSON("vault-config.json")
 provider, _, err := vault.New(config.ID, vault.WithProvider(config.Type))
 ```
