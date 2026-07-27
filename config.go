@@ -78,11 +78,11 @@ func SaveConfigJSON(config Config, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), vaultDirMode); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Clean(path), data, 0600); err != nil {
+	if err := os.WriteFile(filepath.Clean(path), data, vaultFileMode); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

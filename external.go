@@ -115,7 +115,7 @@ func (v *ExternalVaultProvider) getSecretLocked(key string) (Secret, error) {
 			return nil, fmt.Errorf("failed to parse output: %w", err)
 		}
 	} else {
-		secretValue = strings.TrimSpace(output)
+		secretValue = trimCommandNewline(output)
 	}
 
 	return NewSecretValue([]byte(secretValue)), nil
@@ -308,6 +308,17 @@ func (v *ExternalVaultProvider) hasSecretViaExistsCmd(key string) (bool, error) 
 	// A non-zero exit conventionally means "absent", but it is also how an expired
 	// session, a network failure, or a permissions problem surfaces. NotFoundPattern
 	// lets a config say which failures actually mean absence.
+	//
+	// It can only say so about failures that produce a message, though. An exists
+	// command may answer purely by exit status -- `test -f`, `jq -e` -- and then
+	// there is no text for the pattern to match. Treating that as "the pattern did
+	// not match, so this is a real error" turns every ordinary miss into a failure,
+	// so a silent non-zero exit is taken at its word: absent.
+	var cmdErr *commandError
+	if errors.As(err, &cmdErr) && cmdErr.diagnostics() == "" {
+		return false, nil
+	}
+
 	if v.cfg.NotFoundPattern != "" && !strings.Contains(err.Error(), v.cfg.NotFoundPattern) {
 		return false, err
 	}
@@ -383,6 +394,27 @@ func (v *ExternalVaultProvider) Metadata() (Metadata, error) {
 	return Metadata{RawData: metadataOutput}, nil
 }
 
+// commandError carries a failing command's diagnostic output alongside the
+// error, so callers can tell "the command answered by exit status alone" from
+// "the command complained about something" without parsing an error string.
+type commandError struct {
+	stderr string
+	err    error
+}
+
+func (e *commandError) Error() string {
+	if e.stderr == "" {
+		return fmt.Sprintf("command failed: %v", e.err)
+	}
+	return fmt.Sprintf("command failed: %v, stderr: %s", e.err, e.stderr)
+}
+
+func (e *commandError) Unwrap() error { return e.err }
+
+// diagnostics returns the command's output, trimmed. Empty means the command
+// said nothing and reported only through its exit status.
+func (e *commandError) diagnostics() string { return strings.TrimSpace(e.stderr) }
+
 func (v *ExternalVaultProvider) executeCommand(cmd, input string) (string, error) {
 	ctx := v.ctx
 	if ctx == nil {
@@ -396,7 +428,7 @@ func (v *ExternalVaultProvider) executeCommand(cmd, input string) (string, error
 
 	output, runErr := v.execute(ctx, cmd, input, v.cfg.WorkingDir, v.environmentToSlice())
 	if runErr != nil {
-		return "", fmt.Errorf("command failed: %w, stderr: %s", runErr, output)
+		return "", &commandError{stderr: output, err: runErr}
 	}
 
 	return output, nil
@@ -515,7 +547,25 @@ func execute(ctx context.Context, cmd, input, dir string, envList []string) (str
 	// Only stdout is the result. Merging stderr in on success concatenates any
 	// warning the backend emits (e.g. "gpg: WARNING: unsafe permissions") onto
 	// the secret value itself. stderr is still returned on the error path above.
-	return strings.TrimSpace(stdOutBuffer.String()), nil
+	//
+	// Returned verbatim: trimming here would silently corrupt any secret with
+	// deliberate leading or trailing whitespace. Callers that want a tidy string
+	// (list, metadata) trim for themselves; GetSecret strips only the single
+	// trailing newline a command adds.
+	return stdOutBuffer.String(), nil
+}
+
+// trimCommandNewline removes the one trailing line ending a command conventionally
+// adds to its output, and nothing else.
+//
+// TrimSpace would take real data with it: a passphrase may legitimately begin or
+// end with a space, and a PEM block ends in a newline that some parsers require.
+// A secret whose true value ends in a newline is still indistinguishable from one
+// that does not -- that is inherent to reading a value off a command's stdout,
+// and no amount of trimming policy can recover it.
+func trimCommandNewline(s string) string {
+	s = strings.TrimSuffix(s, "\n")
+	return strings.TrimSuffix(s, "\r")
 }
 
 // expandEnv returns a new map with environment references expanded. It must not

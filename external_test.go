@@ -419,9 +419,14 @@ func TestHasSecret_NotFoundPatternDistinguishesRealFailures(t *testing.T) {
 	cfg.Exists.CommandTemplate = "check {{key}}"
 	cfg.NotFoundPattern = "ParameterNotFound"
 
+	// execute() reports a generic "exited with non-zero status" error and returns
+	// the backend's own message as the command output, so these mocks put the
+	// diagnostic where the real executor puts it. A mock that instead encodes it
+	// in the error would be testing a shape that cannot occur.
 	t.Run("absent", func(t *testing.T) {
 		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{}, "", fmt.Errorf("ParameterNotFound: nope")))
+		provider.SetExecutionFunc(capturingExec(&execCapture{},
+			"ParameterNotFound: nope", fmt.Errorf("exit status 1")))
 
 		exists, err := provider.HasSecret("k")
 		if err != nil {
@@ -434,7 +439,8 @@ func TestHasSecret_NotFoundPatternDistinguishesRealFailures(t *testing.T) {
 
 	t.Run("real failure surfaces", func(t *testing.T) {
 		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{}, "", fmt.Errorf("ExpiredToken: session expired")))
+		provider.SetExecutionFunc(capturingExec(&execCapture{},
+			"ExpiredToken: session expired", fmt.Errorf("exit status 254")))
 
 		if _, err := provider.HasSecret("k"); err == nil {
 			t.Error("HasSecret() error = nil, want the expired-session error to surface")
@@ -633,5 +639,120 @@ func TestConcurrentGetSecretDoesNotRaceOnEnvironment(t *testing.T) {
 	// The config map itself must be unchanged: expansion returns a new map.
 	if got := cfg.Environment["LITERAL"]; got != "$(tty)" {
 		t.Errorf("config Environment was mutated: LITERAL = %q, want %q", got, "$(tty)")
+	}
+}
+
+// An exists command may answer purely by exit status -- `test -f`, `jq -e` --
+// leaving no message for NotFoundPattern to match. Treating that as "the
+// pattern did not match, so this is a real error" turned every ordinary miss
+// into a failure. Found by driving the pass preset against a real store.
+func TestHasSecret_SilentNonZeroExitMeansAbsent(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "test -f /nonexistent/{{key}}"
+	cfg.NotFoundPattern = "is not in the password store"
+
+	provider := newTestProvider(t, cfg)
+
+	exists, err := provider.HasSecret("missing")
+	if err != nil {
+		t.Fatalf("HasSecret() on a silent non-zero exit = %v, want a plain false", err)
+	}
+	if exists {
+		t.Error("HasSecret() = true, want false")
+	}
+}
+
+// A command that *does* complain still gets its message checked, so an expired
+// session is not silently reported as "the secret does not exist".
+func TestHasSecret_DiagnosticNotMatchingPatternSurfaces(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "echo 'ExpiredToken: session expired' 1>&2; exit 1"
+	cfg.NotFoundPattern = "ParameterNotFound"
+
+	provider := newTestProvider(t, cfg)
+
+	if _, err := provider.HasSecret("k"); err == nil {
+		t.Error("HasSecret() error = nil, want the expired-session failure to surface")
+	}
+}
+
+func TestHasSecret_DiagnosticMatchingPatternMeansAbsent(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Exists.CommandTemplate = "echo 'ParameterNotFound: nope' 1>&2; exit 1"
+	cfg.NotFoundPattern = "ParameterNotFound"
+
+	provider := newTestProvider(t, cfg)
+
+	exists, err := provider.HasSecret("k")
+	if err != nil {
+		t.Fatalf("HasSecret() = %v, want a plain false", err)
+	}
+	if exists {
+		t.Error("HasSecret() = true, want false")
+	}
+}
+
+// GetSecret used to TrimSpace the command's output, so a secret with deliberate
+// leading or trailing whitespace was stored correctly by the backend and came
+// back mangled. Only the single trailing newline a command adds is removed.
+func TestGetSecret_PreservesDeliberateWhitespace(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdout, want string
+	}{
+		{"leading space", " value\n", " value"},
+		{"trailing space", "value \n", "value "},
+		{"only spaces", "   \n", "   "},
+		{"tabs", "\tvalue\t\n", "\tvalue\t"},
+		{"internal newlines", "line1\nline2\n", "line1\nline2"},
+		{"no trailing newline", "value", "value"},
+		{"crlf", "value\r\n", "value"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newTestProvider(t, validExternalConfig())
+			provider.SetExecutionFunc(func(
+				_ context.Context, _, _, _ string, _ []string,
+			) (string, error) {
+				return tc.stdout, nil
+			})
+
+			secret, err := provider.GetSecret("k")
+			if err != nil {
+				t.Fatalf("GetSecret() error = %v", err)
+			}
+			if got := secret.PlainTextString(); got != tc.want {
+				t.Errorf("GetSecret() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// List and metadata still tidy their output; only the secret value is verbatim.
+func TestListAndMetadataStillTrim(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.List.CommandTemplate = "ls"
+	cfg.Metadata.CommandTemplate = "status"
+
+	provider := newTestProvider(t, cfg)
+	provider.SetExecutionFunc(func(
+		_ context.Context, _, _, _ string, _ []string,
+	) (string, error) {
+		return "  alpha  \n  beta  \n", nil
+	})
+
+	keys, err := provider.ListSecrets()
+	if err != nil {
+		t.Fatalf("ListSecrets() error = %v", err)
+	}
+	if len(keys) != 2 || keys[0] != "alpha" || keys[1] != "beta" {
+		t.Errorf("ListSecrets() = %q, want [alpha beta]", keys)
+	}
+
+	md, err := provider.Metadata()
+	if err != nil {
+		t.Fatalf("Metadata() error = %v", err)
+	}
+	if strings.HasPrefix(md.RawData, " ") || strings.HasSuffix(md.RawData, "\n") {
+		t.Errorf("Metadata().RawData = %q, want it trimmed", md.RawData)
 	}
 }
