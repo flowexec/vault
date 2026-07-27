@@ -78,10 +78,6 @@ func SaveConfigJSON(config Config, path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Owner-only, matching the vault storage directory. A vault config carries
-	// the provider's command templates and environment values, and its presence
-	// alone discloses which secret backends a user has configured; there is no
-	// reason for it to be group-readable when the file itself is 0600.
 	if err := os.MkdirAll(filepath.Dir(path), vaultDirMode); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
