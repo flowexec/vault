@@ -72,36 +72,28 @@ func (v *KeyringVault) legacyNamespaced(kind, key string) string {
 	return fmt.Sprintf("%s-%s-%s", v.id, kind, key)
 }
 
-func (v *KeyringVault) metadataKey() string {
-	return v.namespaced("metadata", "")
-}
-
-func (v *KeyringVault) secretKey(key string) string {
-	return v.namespaced("secret", key)
-}
-
-func (v *KeyringVault) secretsListKey() string {
-	return v.namespaced("secrets-list", "")
-}
-
-// get reads an entry, falling back to the pre-v0.3.0 name. The returned bool
-// reports whether the value came from a legacy entry and so needs migrating.
-func (v *KeyringVault) get(kind, key string) (string, bool, error) {
+// get reads an entry, falling back to the pre-v0.3.0 name.
+//
+// Whether the value came from a legacy entry is deliberately not reported. It
+// would only be useful for deciding to migrate, and set already deletes the
+// legacy entry unconditionally, so the migration happens on the next write
+// either way.
+func (v *KeyringVault) get(kind, key string) (string, error) {
 	data, err := keyring.Get(v.service, v.namespaced(kind, key))
 	if err == nil {
-		return data, false, nil
+		return data, nil
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
-		return "", false, err
+		return "", err
 	}
 
 	data, legacyErr := keyring.Get(v.service, v.legacyNamespaced(kind, key))
 	if legacyErr != nil {
 		// Report the miss against the current name; the legacy lookup is an
 		// implementation detail and its error would only confuse.
-		return "", false, err
+		return "", err
 	}
-	return data, true, nil
+	return data, nil
 }
 
 // set writes an entry under the current name and removes any legacy entry it
@@ -137,7 +129,7 @@ func (v *KeyringVault) initMetadata() error {
 }
 
 func (v *KeyringVault) loadMetadata() error {
-	data, _, err := v.get("metadata", "")
+	data, err := v.get("metadata", "")
 	if err != nil {
 		return err
 	}
@@ -163,7 +155,7 @@ func (v *KeyringVault) saveMetadata() error {
 }
 
 func (v *KeyringVault) loadSecretsList() ([]string, error) {
-	data, _, err := v.get("secrets-list", "")
+	data, err := v.get("secrets-list", "")
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return []string{}, nil
@@ -243,7 +235,7 @@ func (v *KeyringVault) GetSecret(key string) (Secret, error) {
 		return nil, err
 	}
 
-	data, _, err := v.get("secret", key)
+	data, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return nil, ErrSecretNotFound
@@ -282,7 +274,7 @@ func (v *KeyringVault) DeleteSecret(key string) error {
 	}
 
 	// Check if secret exists first
-	_, _, err := v.get("secret", key)
+	_, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return ErrSecretNotFound
@@ -325,7 +317,7 @@ func (v *KeyringVault) HasSecret(key string) (bool, error) {
 		return false, err
 	}
 
-	_, _, err := v.get("secret", key)
+	_, err := v.get("secret", key)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return false, nil
