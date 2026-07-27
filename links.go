@@ -318,20 +318,9 @@ func (v *ExternalVaultProvider) MigrateLegacyLinks() ([]string, error) {
 		return nil, fmt.Errorf("%w: vault %s has no legacy list command to migrate from", ErrInvalidConfig, v.id)
 	}
 
-	cmd, err := v.renderCmdTemplate(v.cfg.LegacyList.CommandTemplate, "", "")
+	output, err := v.runLegacyList()
 	if err != nil {
-		return nil, fmt.Errorf("failed to render legacy list cmd: %w", err)
-	}
-
-	output, err := v.executeCommand(cmd, "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to list secrets for migration: %w", err)
-	}
-
-	if tmpl := v.cfg.LegacyList.OutputTemplate; tmpl != "" {
-		if output, err = v.renderOutputTemplate(tmpl, output); err != nil {
-			return nil, fmt.Errorf("failed to parse legacy list output: %w", err)
-		}
+		return nil, err
 	}
 
 	sep := v.cfg.LegacyListSeparator
@@ -349,10 +338,7 @@ func (v *ExternalVaultProvider) MigrateLegacyLinks() ([]string, error) {
 			if _, exists := reg.Links[key]; exists {
 				continue
 			}
-			// A legacy backend can report names that were never valid keys --
-			// nested paths, titles with spaces. Skip them rather than failing the
-			// whole migration; they can be linked by hand under a chosen alias.
-			if ValidateSecretKey(key) != nil || validateReference(key, v.cfg.ReferencePattern) != nil {
+			if !v.migratableKey(key) {
 				continue
 			}
 			reg.Links[key] = key
@@ -366,4 +352,34 @@ func (v *ExternalVaultProvider) MigrateLegacyLinks() ([]string, error) {
 	}
 
 	return migrated, nil
+}
+
+// runLegacyList executes the pre-v0.4.0 list command and returns its output.
+func (v *ExternalVaultProvider) runLegacyList() (string, error) {
+	cmd, err := v.renderCmdTemplate(v.cfg.LegacyList.CommandTemplate, "", "")
+	if err != nil {
+		return "", fmt.Errorf("failed to render legacy list cmd: %w", err)
+	}
+
+	output, err := v.executeCommand(cmd, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to list secrets for migration: %w", err)
+	}
+
+	if tmpl := v.cfg.LegacyList.OutputTemplate; tmpl != "" {
+		if output, err = v.renderOutputTemplate(tmpl, output); err != nil {
+			return "", fmt.Errorf("failed to parse legacy list output: %w", err)
+		}
+	}
+	return output, nil
+}
+
+// migratableKey reports whether a name a legacy backend returned can be used as
+// both a key and a reference.
+//
+// A legacy backend can report names that were never valid keys -- nested paths,
+// titles with spaces. Those are skipped rather than failing the whole migration;
+// they can still be linked by hand under a chosen alias.
+func (v *ExternalVaultProvider) migratableKey(key string) bool {
+	return ValidateSecretKey(key) == nil && validateReference(key, v.cfg.ReferencePattern) == nil
 }

@@ -56,6 +56,13 @@ func resolveVaultPath(storagePath, id, ext string) (string, error) {
 // checkVaultVersion rejects a vault written by a newer version of the library.
 // The version field was recorded on every save but never read back, so a future
 // format change would have been parsed as though it were the current one.
+//
+// current is 1 for every format today, which makes it look redundant, but the
+// four callers pass four independent constants: aes, age, unencrypted and the
+// link registry each version separately. Collapsing them into one shared value
+// would tie formats together that have no reason to move in step.
+//
+//nolint:unparam // see above
 func checkVaultVersion(version, current int, path string) error {
 	if version > current {
 		return fmt.Errorf(

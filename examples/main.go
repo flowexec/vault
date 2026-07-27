@@ -86,6 +86,14 @@ func main() {
 		log.Fatalf("provider %s does not support links", provider.ID())
 	}
 
+	demonstrateLinks(provider, links, reference)
+
+	fmt.Println("Testing completed successfully")
+}
+
+// demonstrateLinks walks the read-through lifecycle: link a reference, resolve
+// it, list what the vault holds, then unlink.
+func demonstrateLinks(provider vault.Provider, links vault.ReferenceVault, reference string) {
 	fmt.Printf("Linking 'test-key' to %s...\n", reference)
 	if err := links.Link("test-key", reference); err != nil {
 		log.Fatalf("%v", err)
@@ -130,8 +138,6 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 	fmt.Println("Unlinked (the secret itself was not modified)")
-
-	fmt.Println("Testing completed successfully")
 }
 
 func listProviders() {

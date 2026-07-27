@@ -302,8 +302,8 @@ func (v *ExternalVaultProvider) Metadata() (Metadata, error) {
 }
 
 // commandError carries a failing command's diagnostic output alongside the
-// error, so callers can tell "the command answered by exit status alone" from
-// "the command complained about something" without parsing an error string.
+// error, so a caller can report what the backend actually said rather than a
+// bare exit status.
 type commandError struct {
 	stderr string
 	err    error
@@ -317,10 +317,6 @@ func (e *commandError) Error() string {
 }
 
 func (e *commandError) Unwrap() error { return e.err }
-
-// diagnostics returns the command's output, trimmed. Empty means the command
-// said nothing and reported only through its exit status.
-func (e *commandError) diagnostics() string { return strings.TrimSpace(e.stderr) }
 
 func (v *ExternalVaultProvider) executeCommand(cmd, input string) (string, error) {
 	ctx := v.ctx
