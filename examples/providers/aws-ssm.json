@@ -3,27 +3,13 @@
   "type": "external",
   "external": {
     "get": {
-      "cmd": "aws ssm get-parameter --name '/{{key}}' --with-decryption --query Parameter.Value --output text"
-    },
-    "set": {
-      "cmd": "aws ssm put-parameter --name '/{{key}}' --value file:///dev/stdin --type SecureString --overwrite --output json >/dev/null",
-      "input": "{{value}}"
-    },
-    "delete": {
-      "cmd": "aws ssm delete-parameter --name '/{{key}}' --output json >/dev/null"
-    },
-    "list": {
-      "cmd": "aws ssm get-parameters-by-path --path / --output json",
-      "output": "{{ join(map(fromJSON(output)[\"Parameters\"], {trimPrefix(.Name, \"/\")}), \"\\n\") }}"
-    },
-    "separator": "\n",
-    "exists": {
-      "cmd": "aws ssm get-parameter --name '/{{key}}' --query Parameter.Name --output text >/dev/null"
+      "cmd": "aws ssm get-parameter --name '{{ref}}' --with-decryption --query Parameter.Value --output text"
     },
     "metadata": {
       "cmd": "aws sts get-caller-identity --output json",
       "output": "AWS account {{ fromJSON(output)[\"Account\"] }} as {{ fromJSON(output)[\"Arn\"] }}"
     },
+    "reference_pattern": "^/[A-Za-z0-9._/-]+$",
     "not_found_pattern": "ParameterNotFound",
     "environment": {
       "AWS_PAGER": ""

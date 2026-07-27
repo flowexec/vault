@@ -3,27 +3,13 @@
   "type": "external",
   "external": {
     "get": {
-      "cmd": "bw --nointeraction list items | jq -r 'map(select(.name == \"{{key}}\")) | .[0].login.password // (\"secret not found\" | halt_error(1))'"
-    },
-    "set": {
-      "cmd": "id=$(bw --nointeraction list items </dev/null | jq -r 'map(select(.name == \"{{key}}\")) | .[0].id // empty'); jq -Rs '{ object: \"item\", type: 1, name: \"{{key}}\", notes: null, favorite: false, login: { username: null, password: ., totp: null } }' | bw --nointeraction encode | { if [ -n \"$id\" ]; then bw --nointeraction edit item \"$id\"; else bw --nointeraction create item; fi; } >/dev/null",
-      "input": "{{value}}"
-    },
-    "delete": {
-      "cmd": "bw --nointeraction delete item --permanent \"$(bw --nointeraction list items | jq -r 'map(select(.name == \"{{key}}\")) | .[0].id')\" >/dev/null"
-    },
-    "list": {
-      "cmd": "bw --nointeraction list items",
-      "output": "{{ join(map(fromJSON(output), {.name}), \"\\n\") }}"
-    },
-    "separator": "\n",
-    "exists": {
-      "cmd": "bw --nointeraction list items | jq -e 'map(select(.name == \"{{key}}\")) | length > 0' >/dev/null"
+      "cmd": "bw get item '{{ref}}' | jq -r '.login.password'"
     },
     "metadata": {
-      "cmd": "bw --nointeraction status"
+      "cmd": "bw status"
     },
-    "not_found_pattern": "secret not found",
+    "reference_pattern": "^[0-9a-fA-F][0-9a-fA-F-]{7,63}$",
+    "not_found_pattern": "Not found",
     "timeout": "120s"
   }
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,20 +11,22 @@ import (
 	"github.com/flowexec/vault"
 )
 
-const testSecretValue = "s3cr3t"
-
 // validExternalConfig returns a config that satisfies ExternalConfig.Validate.
-// Get and Set command templates are mandatory, so every fixture needs them even
-// when the test only exercises another operation.
+// Only a get command is mandatory now: an external vault reads through to a
+// provider and never writes to it.
 func validExternalConfig() *vault.ExternalConfig {
 	return &vault.ExternalConfig{
-		Get: vault.CommandConfig{CommandTemplate: "vault kv get -format=json {{key}}"},
-		Set: vault.CommandConfig{CommandTemplate: "vault kv put {{key}}"},
+		Get: vault.CommandConfig{CommandTemplate: "vault kv get -format=json {{ref}}"},
 	}
 }
 
+// newTestProvider builds a provider over a throwaway storage directory, so each
+// test gets its own link registry.
 func newTestProvider(t *testing.T, cfg *vault.ExternalConfig) *vault.ExternalVaultProvider {
 	t.Helper()
+	if cfg.StoragePath == "" {
+		cfg.StoragePath = t.TempDir()
+	}
 	provider, err := vault.NewExternalVaultProvider(&vault.Config{
 		ID:       "test-vault",
 		Type:     vault.ProviderTypeExternal,
@@ -38,9 +38,21 @@ func newTestProvider(t *testing.T, cfg *vault.ExternalConfig) *vault.ExternalVau
 	return provider
 }
 
+// linkedProvider builds a provider with key already pointing at reference.
+func linkedProvider(
+	t *testing.T, cfg *vault.ExternalConfig, key, reference string,
+) *vault.ExternalVaultProvider {
+	t.Helper()
+	provider := newTestProvider(t, cfg)
+	if err := provider.Link(key, reference); err != nil {
+		t.Fatalf("Link(%q, %q) error = %v", key, reference, err)
+	}
+	return provider
+}
+
 // execCapture records what the provider actually asked the shell to run. The
 // older mockCommandContext observes neither cmd nor input, so it cannot catch a
-// provider rendering the wrong template or leaking a secret into a command.
+// provider rendering the wrong template or running a command it should not.
 type execCapture struct {
 	cmd, input, dir string
 	env             []string
@@ -66,11 +78,14 @@ func TestNewExternalVaultProvider(t *testing.T) {
 		{
 			name: "valid config",
 			config: &vault.Config{
-				ID:       "test-vault",
-				Type:     vault.ProviderTypeExternal,
-				External: validExternalConfig(),
+				ID:   "test-vault",
+				Type: vault.ProviderTypeExternal,
+				External: func() *vault.ExternalConfig {
+					c := validExternalConfig()
+					c.StoragePath = t.TempDir()
+					return c
+				}(),
 			},
-			wantErr: false,
 		},
 		{
 			name: "missing external config",
@@ -81,11 +96,22 @@ func TestNewExternalVaultProvider(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "missing get and set templates",
+			name: "missing get template",
 			config: &vault.Config{
 				ID:       "test-vault",
 				Type:     vault.ProviderTypeExternal,
-				External: &vault.ExternalConfig{},
+				External: &vault.ExternalConfig{StoragePath: t.TempDir()},
+			},
+			wantErr: true,
+		},
+		{
+			// A vault with nowhere to keep its registry cannot resolve a single
+			// key, so this must fail at construction rather than at first read.
+			name: "missing storage path",
+			config: &vault.Config{
+				ID:       "test-vault",
+				Type:     vault.ProviderTypeExternal,
+				External: validExternalConfig(),
 			},
 			wantErr: true,
 		},
@@ -96,7 +122,22 @@ func TestNewExternalVaultProvider(t *testing.T) {
 				Type: vault.ProviderTypeExternal,
 				External: func() *vault.ExternalConfig {
 					c := validExternalConfig()
+					c.StoragePath = t.TempDir()
 					c.Timeout = "not-a-duration"
+					return c
+				}(),
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid reference pattern",
+			config: &vault.Config{
+				ID:   "test-vault",
+				Type: vault.ProviderTypeExternal,
+				External: func() *vault.ExternalConfig {
+					c := validExternalConfig()
+					c.StoragePath = t.TempDir()
+					c.ReferencePattern = "([unclosed"
 					return c
 				}(),
 			},
@@ -124,17 +165,19 @@ func TestNewExternalVaultProvider(t *testing.T) {
 	}
 }
 
-// A secret interpolated into a command template is a command-injection sink: the
-// rendered string is parsed and run by a shell and the template engine does no
-// quoting. Configs that try must be rejected at load, not silently accepted.
+// An external vault never receives a secret value, so a template asking for one
+// can only ever render empty. Rejecting it beats silently reading the wrong
+// thing, and the check also still guards the old injection sink on any config
+// carried over from before v0.4.0.
 func TestConfigRejectsSecretValueInCommandTemplates(t *testing.T) {
 	for _, tmpl := range []string{
-		"vault kv put {{key}} value={{value}}",
-		"vault kv put {{key}} value={{ value }}",
-		"vault kv put {{key}} pw={{password}}",
+		"vault kv get {{ref}} value={{value}}",
+		"vault kv get {{ref}} value={{ value }}",
+		"vault kv get {{ref}} pw={{password}}",
 	} {
 		cfg := validExternalConfig()
-		cfg.Set.CommandTemplate = tmpl
+		cfg.StoragePath = t.TempDir()
+		cfg.Get.CommandTemplate = tmpl
 
 		_, err := vault.NewExternalVaultProvider(&vault.Config{
 			ID: "test-vault", Type: vault.ProviderTypeExternal, External: cfg,
@@ -149,324 +192,170 @@ func TestConfigRejectsSecretValueInCommandTemplates(t *testing.T) {
 	}
 }
 
-func TestSetSecret_ValueTravelsOverStdinNotTheCommand(t *testing.T) {
+// The whole point of the registry: the command addresses the provider's path,
+// not the local alias.
+func TestGetSecret_RendersTheReferenceNotTheKey(t *testing.T) {
 	cfg := validExternalConfig()
-	cfg.Set.CommandTemplate = "store {{key}}"
-	cfg.Set.InputTemplate = "{{ value }}"
-	// A Get input template that must NOT be used for the set operation.
-	cfg.Get.InputTemplate = "WRONG-TEMPLATE"
+	cfg.Get.CommandTemplate = "op read '{{ref}}'"
 
-	provider := newTestProvider(t, cfg)
-	rec := &execCapture{}
-	provider.SetExecutionFunc(capturingExec(rec, "", nil))
-
-	if err := provider.SetSecret("test-key", vault.NewSecretValue([]byte(testSecretValue))); err != nil {
-		t.Fatalf("SetSecret() error = %v", err)
-	}
-
-	if rec.input != testSecretValue {
-		t.Errorf("stdin = %q, want %q (set input template was not rendered)", rec.input, testSecretValue)
-	}
-	if strings.Contains(rec.cmd, testSecretValue) {
-		t.Errorf("secret leaked into the command string: %q", rec.cmd)
-	}
-	if rec.cmd != "store test-key" {
-		t.Errorf("cmd = %q, want %q", rec.cmd, "store test-key")
-	}
-}
-
-// A value containing shell metacharacters must round-trip byte-exact. Before the
-// fix, "p@$$w0rd" had $$ expanded to the PID and a different secret was stored.
-func TestSetSecret_ValueWithShellMetacharactersIsUntouched(t *testing.T) {
-	for _, value := range []string{
-		`p@$$w0rd`,
-		`correct horse battery`,
-		`hunter2; echo pwned`,
-		"back`tick`",
-		`quote'and"quote`,
-		"multi\nline",
-	} {
-		cfg := validExternalConfig()
-		cfg.Set.CommandTemplate = "store {{key}}"
-		cfg.Set.InputTemplate = "{{ value }}"
-
-		provider := newTestProvider(t, cfg)
-		rec := &execCapture{}
-		provider.SetExecutionFunc(capturingExec(rec, "", nil))
-
-		if err := provider.SetSecret("k", vault.NewSecretValue([]byte(value))); err != nil {
-			t.Fatalf("SetSecret(%q) error = %v", value, err)
-		}
-		if rec.input != value {
-			t.Errorf("stdin = %q, want %q", rec.input, value)
-		}
-		if strings.Contains(rec.cmd, value) {
-			t.Errorf("value %q leaked into command %q", value, rec.cmd)
-		}
-	}
-}
-
-func TestSetSecret_InputTemplateSeesTheKey(t *testing.T) {
-	cfg := validExternalConfig()
-	cfg.Set.CommandTemplate = "store"
-	cfg.Set.InputTemplate = "{{ key }}:{{ value }}"
-
-	provider := newTestProvider(t, cfg)
-	rec := &execCapture{}
-	provider.SetExecutionFunc(capturingExec(rec, "", nil))
-
-	if err := provider.SetSecret("my-key", vault.NewSecretValue([]byte(testSecretValue))); err != nil {
-		t.Fatalf("SetSecret() error = %v", err)
-	}
-	if want := "my-key:" + testSecretValue; rec.input != want {
-		t.Errorf("stdin = %q, want %q", rec.input, want)
-	}
-}
-
-// Each operation must render its own input template. All of these previously
-// rendered Get's template instead.
-func TestOperationsRenderTheirOwnInputTemplate(t *testing.T) {
-	t.Run("delete", func(t *testing.T) {
-		cfg := validExternalConfig()
-		cfg.Get.InputTemplate = "WRONG"
-		cfg.Delete.CommandTemplate = "rm {{key}}"
-		cfg.Delete.InputTemplate = "delete:{{ input }}"
-
-		provider := newTestProvider(t, cfg)
-		rec := &execCapture{}
-		provider.SetExecutionFunc(capturingExec(rec, "", nil))
-
-		if err := provider.DeleteSecret("k"); err != nil {
-			t.Fatalf("DeleteSecret() error = %v", err)
-		}
-		if rec.input != "delete:k" {
-			t.Errorf("stdin = %q, want %q", rec.input, "delete:k")
-		}
-	})
-
-	t.Run("list", func(t *testing.T) {
-		cfg := validExternalConfig()
-		cfg.Get.InputTemplate = "WRONG"
-		cfg.List.CommandTemplate = "ls"
-		cfg.List.InputTemplate = "list-input"
-
-		provider := newTestProvider(t, cfg)
-		rec := &execCapture{}
-		provider.SetExecutionFunc(capturingExec(rec, "a\nb", nil))
-
-		if _, err := provider.ListSecrets(); err != nil {
-			t.Fatalf("ListSecrets() error = %v", err)
-		}
-		if rec.input != "list-input" {
-			t.Errorf("stdin = %q, want %q", rec.input, "list-input")
-		}
-	})
-
-	// Metadata previously gated on List's input template, so a configured
-	// metadata input was ignored unless list.input happened to be set too.
-	t.Run("metadata", func(t *testing.T) {
-		cfg := validExternalConfig()
-		cfg.Metadata.CommandTemplate = "status"
-		cfg.Metadata.InputTemplate = "meta-input"
-
-		provider := newTestProvider(t, cfg)
-		rec := &execCapture{}
-		provider.SetExecutionFunc(capturingExec(rec, "ok", nil))
-
-		if _, err := provider.Metadata(); err != nil {
-			t.Fatalf("Metadata() error = %v", err)
-		}
-		if rec.input != "meta-input" {
-			t.Errorf("stdin = %q, want %q", rec.input, "meta-input")
-		}
-	})
-}
-
-// Configs written against the old behaviour set only Get.InputTemplate; that
-// must keep working.
-func TestGetInputTemplateBackCompat(t *testing.T) {
-	cfg := validExternalConfig()
-	cfg.Get.InputTemplate = "{{ input }}"
-
-	provider := newTestProvider(t, cfg)
+	provider := linkedProvider(t, cfg, "aws-key", "op://Team/AWS/access_key_id")
 	rec := &execCapture{}
 	provider.SetExecutionFunc(capturingExec(rec, "value", nil))
 
-	if _, err := provider.GetSecret("my-key"); err != nil {
+	if _, err := provider.GetSecret("aws-key"); err != nil {
 		t.Fatalf("GetSecret() error = %v", err)
 	}
-	if rec.input != "my-key" {
-		t.Errorf("stdin = %q, want %q", rec.input, "my-key")
+
+	if want := "op read 'op://Team/AWS/access_key_id'"; rec.cmd != want {
+		t.Errorf("cmd = %q, want %q", rec.cmd, want)
 	}
 }
 
-func TestExternalVaultProvider_GetSecret(t *testing.T) {
-	tests := []struct {
-		name          string
-		key           string
-		out           string
-		execErr       error
-		wantSecret    string
-		wantErr       bool
-		errorContains string
-	}{
-		{name: "successful get", key: "test-key", out: "secret-value", wantSecret: "secret-value"},
-		{
-			name: "command fails", key: "test-key", execErr: fmt.Errorf("command failed"),
-			wantErr: true, errorContains: "failed to get secret",
-		},
-		{name: "invalid key", key: "", wantErr: true, errorContains: "invalid secret key"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			provider := newTestProvider(t, validExternalConfig())
-			provider.SetExecutionFunc(capturingExec(&execCapture{}, tt.out, tt.execErr))
-
-			secret, err := provider.GetSecret(tt.key)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("GetSecret() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if err != nil {
-				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
-					t.Errorf("GetSecret() error = %v, want error containing %v", err, tt.errorContains)
-				}
-				return
-			}
-			if secret.PlainTextString() != tt.wantSecret {
-				t.Errorf("GetSecret() secret = %v, want %v", secret.PlainTextString(), tt.wantSecret)
-			}
-		})
-	}
-}
-
-func TestExternalVaultProvider_ListSecrets(t *testing.T) {
-	tests := []struct {
-		name        string
-		out         string
-		execErr     error
-		wantSecrets []string
-		wantErr     bool
-	}{
-		{name: "successful list", out: "secret1\nsecret2\nsecret3", wantSecrets: []string{"secret1", "secret2", "secret3"}},
-		{name: "empty list", out: "", wantSecrets: []string{}},
-		{name: "command fails", execErr: fmt.Errorf("command failed"), wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validExternalConfig()
-			cfg.List.CommandTemplate = "vault kv list"
-
-			provider := newTestProvider(t, cfg)
-			provider.SetExecutionFunc(capturingExec(&execCapture{}, tt.out, tt.execErr))
-
-			secrets, err := provider.ListSecrets()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ListSecrets() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if tt.wantErr {
-				return
-			}
-			if len(secrets) != len(tt.wantSecrets) {
-				t.Fatalf("ListSecrets() returned %d secrets, want %d", len(secrets), len(tt.wantSecrets))
-			}
-			for i, secret := range secrets {
-				if secret != tt.wantSecrets[i] {
-					t.Errorf("ListSecrets() secret[%d] = %v, want %v", i, secret, tt.wantSecrets[i])
-				}
-			}
-		})
-	}
-}
-
-func TestExternalVaultProvider_HasSecret(t *testing.T) {
-	tests := []struct {
-		name       string
-		key        string
-		execErr    error
-		wantExists bool
-	}{
-		{name: "secret exists", key: "existing-key", wantExists: true},
-		{name: "secret does not exist", key: "nonexistent-key", execErr: fmt.Errorf("not found"), wantExists: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validExternalConfig()
-			cfg.Exists.CommandTemplate = "vault kv get {{key}}"
-
-			provider := newTestProvider(t, cfg)
-			provider.SetExecutionFunc(capturingExec(&execCapture{}, "some-value", tt.execErr))
-
-			exists, err := provider.HasSecret(tt.key)
-			if err != nil {
-				t.Fatalf("HasSecret() error = %v", err)
-			}
-			if exists != tt.wantExists {
-				t.Errorf("HasSecret() = %v, want %v", exists, tt.wantExists)
-			}
-		})
-	}
-}
-
-// NotFoundPattern separates "absent" from "the backend is broken". Without it,
-// an expired session reports the secret as simply missing.
-func TestHasSecret_NotFoundPatternDistinguishesRealFailures(t *testing.T) {
+// Both variables are available: {{ref}} for the provider, {{key}} for the alias.
+func TestGetSecret_TemplateSeesBothKeyAndReference(t *testing.T) {
 	cfg := validExternalConfig()
-	cfg.Exists.CommandTemplate = "check {{key}}"
+	cfg.Get.CommandTemplate = "get {{key}} from {{ref}}"
+
+	provider := linkedProvider(t, cfg, "alias", "some/path")
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "v", nil))
+
+	if _, err := provider.GetSecret("alias"); err != nil {
+		t.Fatalf("GetSecret() error = %v", err)
+	}
+	if want := "get alias from some/path"; rec.cmd != want {
+		t.Errorf("cmd = %q, want %q", rec.cmd, want)
+	}
+}
+
+// An unlinked key is answered from the registry alone. Spawning a provider
+// process to be told about a name the vault never knew is wasted work, and for
+// 1Password it would raise a biometric prompt for a key that cannot resolve.
+func TestGetSecret_UnknownKeyRunsNoCommand(t *testing.T) {
+	provider := newTestProvider(t, validExternalConfig())
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "value", nil))
+
+	_, err := provider.GetSecret("never-linked")
+	if !errors.Is(err, vault.ErrSecretNotFound) {
+		t.Errorf("GetSecret() error = %v, want ErrSecretNotFound", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("ran %d commands for an unlinked key, want 0", rec.calls)
+	}
+}
+
+// A link whose target has since been removed in the provider is a broken link,
+// not a mystery failure.
+func TestGetSecret_NotFoundPatternMarksABrokenLink(t *testing.T) {
+	cfg := validExternalConfig()
 	cfg.NotFoundPattern = "ParameterNotFound"
 
-	// execute() reports a generic "exited with non-zero status" error and returns
-	// the backend's own message as the command output, so these mocks put the
-	// diagnostic where the real executor puts it. A mock that instead encodes it
-	// in the error would be testing a shape that cannot occur.
-	t.Run("absent", func(t *testing.T) {
-		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{},
-			"ParameterNotFound: nope", fmt.Errorf("exit status 1")))
+	provider := linkedProvider(t, cfg, "k", "/prod/db/password")
+	provider.SetExecutionFunc(capturingExec(&execCapture{},
+		"ParameterNotFound: nope", fmt.Errorf("exit status 254")))
 
-		exists, err := provider.HasSecret("k")
-		if err != nil {
-			t.Fatalf("HasSecret() error = %v", err)
-		}
-		if exists {
-			t.Error("HasSecret() = true, want false")
-		}
-	})
-
-	t.Run("real failure surfaces", func(t *testing.T) {
-		provider := newTestProvider(t, cfg)
-		provider.SetExecutionFunc(capturingExec(&execCapture{},
-			"ExpiredToken: session expired", fmt.Errorf("exit status 254")))
-
-		if _, err := provider.HasSecret("k"); err == nil {
-			t.Error("HasSecret() error = nil, want the expired-session error to surface")
-		}
-	})
+	_, err := provider.GetSecret("k")
+	if !errors.Is(err, vault.ErrSecretNotFound) {
+		t.Errorf("GetSecret() error = %v, want ErrSecretNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "/prod/db/password") {
+		t.Errorf("error %v does not name the reference that failed", err)
+	}
 }
 
-// HasSecret with no exists command delegates to the get path. Doing that through
-// the exported GetSecret would take a second read lock, which deadlocks if a
-// writer arrives in between, because sync.RWMutex is not reentrant.
-func TestHasSecret_WithoutExistsCommandDoesNotDeadlock(t *testing.T) {
+func TestSetSecret_IsRejected(t *testing.T) {
 	provider := newTestProvider(t, validExternalConfig())
-	provider.SetExecutionFunc(capturingExec(&execCapture{}, "value", nil))
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "", nil))
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 50; i++ {
-			_, _ = provider.HasSecret("k")
-		}
-	}()
-	// Contend with writers so a queued writer sits between the two read locks.
-	for i := 0; i < 50; i++ {
-		_ = provider.SetSecret("k", vault.NewSecretValue([]byte("v")))
+	err := provider.SetSecret("k", vault.NewSecretValue([]byte("v")))
+	if !errors.Is(err, vault.ErrReadOnly) {
+		t.Errorf("SetSecret() error = %v, want ErrReadOnly", err)
 	}
-	<-done
+	if rec.calls != 0 {
+		t.Errorf("ran %d commands, want 0", rec.calls)
+	}
+}
+
+// The safety property this design exists for: removing a secret from the vault
+// must not be able to destroy the data it points at.
+func TestDeleteSecret_UnlinksAndRunsNoCommand(t *testing.T) {
+	provider := linkedProvider(t, validExternalConfig(), "k", "team/db/password")
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "", nil))
+
+	if err := provider.DeleteSecret("k"); err != nil {
+		t.Fatalf("DeleteSecret() error = %v", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("DeleteSecret ran %d commands against the provider, want 0", rec.calls)
+	}
+
+	exists, err := provider.HasSecret("k")
+	if err != nil {
+		t.Fatalf("HasSecret() error = %v", err)
+	}
+	if exists {
+		t.Error("HasSecret() = true after delete, want false")
+	}
+}
+
+func TestDeleteSecret_UnknownKeyIsAnError(t *testing.T) {
+	provider := newTestProvider(t, validExternalConfig())
+	if err := provider.DeleteSecret("nope"); !errors.Is(err, vault.ErrSecretNotFound) {
+		t.Errorf("DeleteSecret() error = %v, want ErrSecretNotFound", err)
+	}
+}
+
+// The vault lists what has been linked into it, not the provider's inventory.
+func TestListSecrets_ReturnsLinkedKeysSorted(t *testing.T) {
+	provider := newTestProvider(t, validExternalConfig())
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "SHOULD NOT BE USED", nil))
+
+	for key, ref := range map[string]string{
+		"zeta": "a/z", "alpha": "a/a", "mid": "a/m",
+	} {
+		if err := provider.Link(key, ref); err != nil {
+			t.Fatalf("Link() error = %v", err)
+		}
+	}
+
+	keys, err := provider.ListSecrets()
+	if err != nil {
+		t.Fatalf("ListSecrets() error = %v", err)
+	}
+	if want := []string{"alpha", "mid", "zeta"}; !equalStrings(keys, want) {
+		t.Errorf("ListSecrets() = %v, want %v", keys, want)
+	}
+	if rec.calls != 0 {
+		t.Errorf("ListSecrets ran %d commands, want 0", rec.calls)
+	}
+}
+
+// A boolean must not cost a provider round trip: callers use HasSecret on paths
+// that do not expect to block on the network or on a biometric prompt.
+func TestHasSecret_IsARegistryLookup(t *testing.T) {
+	provider := linkedProvider(t, validExternalConfig(), "linked", "a/b")
+	rec := &execCapture{}
+	provider.SetExecutionFunc(capturingExec(rec, "", fmt.Errorf("should not run")))
+
+	for _, tc := range []struct {
+		key  string
+		want bool
+	}{{"linked", true}, {"absent", false}} {
+		got, err := provider.HasSecret(tc.key)
+		if err != nil {
+			t.Fatalf("HasSecret(%q) error = %v", tc.key, err)
+		}
+		if got != tc.want {
+			t.Errorf("HasSecret(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+	if rec.calls != 0 {
+		t.Errorf("HasSecret ran %d commands, want 0", rec.calls)
+	}
 }
 
 func TestExternalVaultProvider_Metadata(t *testing.T) {
@@ -514,10 +403,9 @@ func TestExternalVaultProvider_Metadata(t *testing.T) {
 
 func TestClosedProviderReturnsErrVaultClosed(t *testing.T) {
 	cfg := validExternalConfig()
-	cfg.List.CommandTemplate = "ls"
 	cfg.Metadata.CommandTemplate = "status"
 
-	provider := newTestProvider(t, cfg)
+	provider := linkedProvider(t, cfg, "k", "a/b")
 	provider.SetExecutionFunc(capturingExec(&execCapture{}, "ok", nil))
 	if err := provider.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -541,6 +429,12 @@ func TestClosedProviderReturnsErrVaultClosed(t *testing.T) {
 	if _, err := provider.Metadata(); !errors.Is(err, vault.ErrVaultClosed) {
 		t.Errorf("Metadata() after Close = %v, want ErrVaultClosed", err)
 	}
+	if err := provider.Link("k2", "a/c"); !errors.Is(err, vault.ErrVaultClosed) {
+		t.Errorf("Link() after Close = %v, want ErrVaultClosed", err)
+	}
+	if _, err := provider.Links(); !errors.Is(err, vault.ErrVaultClosed) {
+		t.Errorf("Links() after Close = %v, want ErrVaultClosed", err)
+	}
 }
 
 // Exercises the real execute(), not a mock. stderr merged into stdout on success
@@ -549,7 +443,7 @@ func TestExecute_StderrIsNotMergedIntoTheSecret(t *testing.T) {
 	cfg := validExternalConfig()
 	cfg.Get.CommandTemplate = "printf 'the-secret'; printf 'gpg: WARNING: unsafe permissions' 1>&2"
 
-	provider := newTestProvider(t, cfg)
+	provider := linkedProvider(t, cfg, "k", "a/b")
 
 	secret, err := provider.GetSecret("k")
 	if err != nil {
@@ -560,62 +454,46 @@ func TestExecute_StderrIsNotMergedIntoTheSecret(t *testing.T) {
 	}
 }
 
-// End-to-end through the real shell, not a mock: a secret full of shell
-// metacharacters must survive a set/get round trip byte-exact. This is the
-// behaviour the injection fix exists to guarantee.
-func TestExternalProvider_RoundTripThroughRealShell(t *testing.T) {
-	dir := t.TempDir()
-	store := filepath.Join(dir, "secret.txt")
+// End-to-end through the real shell: a reference is substituted into a command a
+// shell then parses, so the quoting has to survive contact with real data.
+func TestGetSecret_ReferenceReachesTheRealShellIntact(t *testing.T) {
+	cfg := validExternalConfig()
+	cfg.Get.CommandTemplate = "printf '%s' '{{ref}}'"
 
-	cfg := &vault.ExternalConfig{
-		Get: vault.CommandConfig{CommandTemplate: "cat '" + store + "'"},
-		Set: vault.CommandConfig{
-			CommandTemplate: "cat > '" + store + "'",
-			InputTemplate:   "{{ value }}",
-		},
-	}
-	provider := newTestProvider(t, cfg)
-
-	for _, value := range []string{
-		`p@$$w0rd`,
-		`correct horse battery`,
-		`hunter2; echo pwned > ` + filepath.Join(dir, "injected"),
-		"back`echo tick`",
-		`quote'and"quote`,
-		`glob*star?`,
-		`$(id)`,
-		`${HOME}`,
+	for _, reference := range []string{
+		"op://Team/AWS/access_key_id",
+		"team/db/password",
+		"/prod/service-a/api key",
+		"path/with*glob?chars",
+		"trailing/space ",
 	} {
-		if err := provider.SetSecret("k", vault.NewSecretValue([]byte(value))); err != nil {
-			t.Fatalf("SetSecret(%q) error = %v", value, err)
+		provider := newTestProvider(t, cfg)
+		if err := provider.Link("k", reference); err != nil {
+			t.Fatalf("Link(%q) error = %v", reference, err)
 		}
 
 		secret, err := provider.GetSecret("k")
 		if err != nil {
-			t.Fatalf("GetSecret() after setting %q error = %v", value, err)
+			t.Fatalf("GetSecret() for %q error = %v", reference, err)
 		}
-		if got := secret.PlainTextString(); got != value {
-			t.Errorf("round trip: got %q, want %q", got, value)
+		if got := secret.PlainTextString(); got != reference {
+			t.Errorf("reference reached the shell as %q, want %q", got, reference)
 		}
-	}
-
-	// The injection attempt above must not have run.
-	if _, err := os.Stat(filepath.Join(dir, "injected")); !os.IsNotExist(err) {
-		t.Error("command injection succeeded: the payload created a file")
 	}
 }
 
 // expandEnv used to mutate the shared config map while callers held only a read
 // lock, which is an unrecoverable "concurrent map writes" fault. Run with -race.
-func TestConcurrentGetSecretDoesNotRaceOnEnvironment(t *testing.T) {
+func TestConcurrentReadsDoNotRaceOnEnvironment(t *testing.T) {
 	cfg := validExternalConfig()
+	cfg.Metadata.CommandTemplate = "status"
 	cfg.Environment = map[string]string{
 		"HOME_REF": "$HOME",
 		"LITERAL":  "$(tty)",
 		"PLAIN":    "value",
 	}
 
-	provider := newTestProvider(t, cfg)
+	provider := linkedProvider(t, cfg, "k", "a/b")
 	// Reads are concurrent by design, so the exec func must be stateless here --
 	// a shared execCapture would itself race and mask what we are testing.
 	provider.SetExecutionFunc(func(
@@ -631,6 +509,7 @@ func TestConcurrentGetSecretDoesNotRaceOnEnvironment(t *testing.T) {
 			defer wg.Done()
 			_, _ = provider.GetSecret("k")
 			_, _ = provider.ListSecrets()
+			_, _ = provider.HasSecret("k")
 			_, _ = provider.Metadata()
 		}()
 	}
@@ -639,56 +518,6 @@ func TestConcurrentGetSecretDoesNotRaceOnEnvironment(t *testing.T) {
 	// The config map itself must be unchanged: expansion returns a new map.
 	if got := cfg.Environment["LITERAL"]; got != "$(tty)" {
 		t.Errorf("config Environment was mutated: LITERAL = %q, want %q", got, "$(tty)")
-	}
-}
-
-// An exists command may answer purely by exit status -- `test -f`, `jq -e` --
-// leaving no message for NotFoundPattern to match. Treating that as "the
-// pattern did not match, so this is a real error" turned every ordinary miss
-// into a failure. Found by driving the pass preset against a real store.
-func TestHasSecret_SilentNonZeroExitMeansAbsent(t *testing.T) {
-	cfg := validExternalConfig()
-	cfg.Exists.CommandTemplate = "test -f /nonexistent/{{key}}"
-	cfg.NotFoundPattern = "is not in the password store"
-
-	provider := newTestProvider(t, cfg)
-
-	exists, err := provider.HasSecret("missing")
-	if err != nil {
-		t.Fatalf("HasSecret() on a silent non-zero exit = %v, want a plain false", err)
-	}
-	if exists {
-		t.Error("HasSecret() = true, want false")
-	}
-}
-
-// A command that *does* complain still gets its message checked, so an expired
-// session is not silently reported as "the secret does not exist".
-func TestHasSecret_DiagnosticNotMatchingPatternSurfaces(t *testing.T) {
-	cfg := validExternalConfig()
-	cfg.Exists.CommandTemplate = "echo 'ExpiredToken: session expired' 1>&2; exit 1"
-	cfg.NotFoundPattern = "ParameterNotFound"
-
-	provider := newTestProvider(t, cfg)
-
-	if _, err := provider.HasSecret("k"); err == nil {
-		t.Error("HasSecret() error = nil, want the expired-session failure to surface")
-	}
-}
-
-func TestHasSecret_DiagnosticMatchingPatternMeansAbsent(t *testing.T) {
-	cfg := validExternalConfig()
-	cfg.Exists.CommandTemplate = "echo 'ParameterNotFound: nope' 1>&2; exit 1"
-	cfg.NotFoundPattern = "ParameterNotFound"
-
-	provider := newTestProvider(t, cfg)
-
-	exists, err := provider.HasSecret("k")
-	if err != nil {
-		t.Fatalf("HasSecret() = %v, want a plain false", err)
-	}
-	if exists {
-		t.Error("HasSecret() = true, want false")
 	}
 }
 
@@ -709,7 +538,7 @@ func TestGetSecret_PreservesDeliberateWhitespace(t *testing.T) {
 		{"empty", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			provider := newTestProvider(t, validExternalConfig())
+			provider := linkedProvider(t, validExternalConfig(), "k", "a/b")
 			provider.SetExecutionFunc(func(
 				_ context.Context, _, _, _ string, _ []string,
 			) (string, error) {
@@ -727,32 +556,35 @@ func TestGetSecret_PreservesDeliberateWhitespace(t *testing.T) {
 	}
 }
 
-// List and metadata still tidy their output; only the secret value is verbatim.
-func TestListAndMetadataStillTrim(t *testing.T) {
+// Metadata still tidies its output; only the secret value is verbatim.
+func TestMetadataStillTrims(t *testing.T) {
 	cfg := validExternalConfig()
-	cfg.List.CommandTemplate = "ls"
 	cfg.Metadata.CommandTemplate = "status"
 
 	provider := newTestProvider(t, cfg)
 	provider.SetExecutionFunc(func(
 		_ context.Context, _, _, _ string, _ []string,
 	) (string, error) {
-		return "  alpha  \n  beta  \n", nil
+		return "  account 1234  \n", nil
 	})
-
-	keys, err := provider.ListSecrets()
-	if err != nil {
-		t.Fatalf("ListSecrets() error = %v", err)
-	}
-	if len(keys) != 2 || keys[0] != "alpha" || keys[1] != "beta" {
-		t.Errorf("ListSecrets() = %q, want [alpha beta]", keys)
-	}
 
 	md, err := provider.Metadata()
 	if err != nil {
 		t.Fatalf("Metadata() error = %v", err)
 	}
-	if strings.HasPrefix(md.RawData, " ") || strings.HasSuffix(md.RawData, "\n") {
-		t.Errorf("Metadata().RawData = %q, want it trimmed", md.RawData)
+	if md.RawData != "account 1234" {
+		t.Errorf("Metadata().RawData = %q, want %q", md.RawData, "account 1234")
 	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

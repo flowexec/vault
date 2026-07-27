@@ -114,35 +114,58 @@ provider, _, err := vault.New("my-vault",
 ### External CLI Providers
 
 #### External Provider
-Integrates with any CLI tool for secret management. Supports popular tools like Bitwarden, 1Password, HashiCorp Vault, AWS SSM, and more.
+
+Reads secrets that live in another tool — 1Password, pass, AWS SSM, Bitwarden —
+through that tool's CLI.
+
+An external vault is a **read-through registry, not a store**. It holds a set of
+*links*: a key you choose, paired with a *reference* the provider understands.
+Reading a key resolves its reference and runs the get command. Nothing is ever
+written back.
 
 ```go
 config := &vault.Config{
-    ID: "bitwarden",
+    ID:   "work",
     Type: vault.ProviderTypeExternal,
     External: &vault.ExternalConfig{
         Get: vault.CommandConfig{
-            CommandTemplate: "bw get password '{{key}}'",
+            CommandTemplate: "op read --no-newline '{{ref}}'",
         },
-        Set: vault.CommandConfig{
-            CommandTemplate: "bw create item",
-            // The secret is piped to the command's stdin, never placed in it.
-            InputTemplate: "{{value}}",
-        },
-        // ... other operations
+        // Where the link registry is kept.
+        StoragePath: "~/.config/flow/vaults",
+        // Catches a mistyped reference at link time rather than at read time.
+        ReferencePattern: `^op://[^/]+/[^/]+/[^/]+$`,
     },
 }
 
-provider, err := vault.NewExternalVaultProvider(config)
+provider, _ := vault.NewExternalVaultProvider(config)
+
+// Point a key at something that already exists. Note the field on the end:
+// one item's several credentials are addressed individually.
+links := provider.(vault.ReferenceVault)
+_ = links.Link("aws-access-key", "op://Team/AWS/access_key_id")
+_ = links.Link("aws-secret-key", "op://Team/AWS/secret_access_key")
+
+secret, _ := provider.GetSecret("aws-access-key")
 ```
 
-> **The secret value is not available to command templates.** A rendered command
-> is parsed and run by a shell and the template engine does no quoting, so
-> interpolating a secret there is a command-injection sink and silently corrupts
-> any value containing shell metacharacters (`p@$$w0rd` has `$$` replaced by the
-> process ID; `correct horse battery` word-splits to `correct`). Configurations
-> referencing `{{value}}` or `{{password}}` in a `cmd` are rejected at load —
-> use an `InputTemplate` instead.
+Because the key is a local alias, you never have to reorganise the store you are
+pointing at, and because a reference names a field, one item's several
+credentials are individually reachable.
+
+> **Reads only.** `SetSecret` returns `ErrReadOnly`, and `DeleteSecret` removes
+> the *link* — the secret in the provider is untouched. Create secrets in the
+> tool that owns them.
+>
+> This is deliberate. Writing through meant handing the value to a provider CLI,
+> and none of them accept one safely: 1Password takes it as an argv assignment,
+> visible to every process on the machine. It also meant a delete that destroyed
+> real data, and a set that rebuilt an item from scratch, dropping whatever else
+> was on it.
+
+References are validated before they reach a shell — no quotes, backticks, `$`,
+backslashes, control characters, leading dashes or `..` segments — on the way in
+*and* on the way out, since a registry is a file that can be hand-edited.
 
 **External Provider Examples**
 

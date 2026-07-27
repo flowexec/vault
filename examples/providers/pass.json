@@ -3,26 +3,13 @@
   "type": "external",
   "external": {
     "get": {
-      "cmd": "pass show '{{key}}'"
-    },
-    "set": {
-      "cmd": "pass insert -m -f '{{key}}' >/dev/null",
-      "input": "{{value}}"
-    },
-    "delete": {
-      "cmd": "pass rm -f '{{key}}' >/dev/null"
-    },
-    "list": {
-      "cmd": "cd \"${PASSWORD_STORE_DIR:-$HOME/.password-store}\" && find . -name '*.gpg' -type f | sed -e 's|^\\./||' -e 's|\\.gpg$||'"
-    },
-    "separator": "\n",
-    "exists": {
-      "cmd": "test -f \"${PASSWORD_STORE_DIR:-$HOME/.password-store}/{{key}}.gpg\""
+      "cmd": "pass show '{{ref}}'"
     },
     "metadata": {
       "cmd": "cat \"${PASSWORD_STORE_DIR:-$HOME/.password-store}/.gpg-id\"",
       "output": "pass store recipients: {{ trim(output) }}"
     },
+    "reference_pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$",
     "not_found_pattern": "is not in the password store",
     "timeout": "120s"
   }
