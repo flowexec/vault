@@ -1,6 +1,6 @@
 module github.com/flowexec/vault
 
-go 1.25.0
+go 1.26.0
 
 require (
 	filippo.io/age v1.3.1
@@ -9,7 +9,7 @@ require (
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.54.0
 	gopkg.in/yaml.v3 v3.0.1
-	mvdan.cc/sh/v3 v3.13.1
+	mvdan.cc/sh/v3 v3.14.0
 )
 
 require (
