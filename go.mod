@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	filippo.io/age v1.3.1
-	github.com/gofrs/flock v0.13.0
+	github.com/gofrs/flock v0.13.1
 	github.com/jahvon/expression v0.1.4
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.54.0
