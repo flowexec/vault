@@ -7,7 +7,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/jahvon/expression v0.1.4
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	gopkg.in/yaml.v3 v3.0.1
 	mvdan.cc/sh/v3 v3.13.1
 )
