@@ -2,7 +2,9 @@ package vault_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -135,5 +137,60 @@ func TestShippedExampleProvidersAreReadOnly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The 1Password example must round-trip values exactly through the real command runner. op read
+// appends a newline only when the value lacks one, and --no-newline never does, while GetSecret
+// strips one trailing newline; so the example has to emit exactly one itself, or a value ending
+// in a newline (a kubeconfig, a PEM block) comes back without it.
+func TestOnePasswordExampleRoundTripsTrailingNewlines(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake op is a POSIX shell script")
+	}
+
+	bin := t.TempDir()
+	fakeOp := `#!/bin/sh
+# Mimics op read: prints the value, adding a newline only when it is missing and never with --no-newline.
+nonl=false
+for a in "$@"; do [ "$a" = "--no-newline" ] && nonl=true; done
+printf '%s' "$FAKE_OP_VALUE"
+if [ "$nonl" = false ]; then
+  case "$FAKE_OP_VALUE" in *"
+") ;; *) printf '\n' ;; esac
+fi
+`
+	if err := os.WriteFile(filepath.Join(bin, "op"), []byte(fakeOp), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg, err := vault.LoadConfigJSON("examples/providers/1password.json")
+	if err != nil {
+		t.Fatalf("LoadConfigJSON() error = %v", err)
+	}
+	cfg.External.StoragePath = t.TempDir()
+	provider, err := vault.NewExternalVaultProvider(&cfg)
+	if err != nil {
+		t.Fatalf("config was rejected: %v", err)
+	}
+	if err := provider.Link("k", "op://Team/Item/field"); err != nil {
+		t.Fatalf("Link() error = %v", err)
+	}
+
+	for _, value := range []string{
+		"single-line-token",
+		"apiVersion: v1\nkind: Config\n",
+		"trailing space ",
+		"ends with two newlines\n\n",
+	} {
+		t.Setenv("FAKE_OP_VALUE", value)
+		secret, err := provider.GetSecret("k")
+		if err != nil {
+			t.Fatalf("GetSecret() error = %v", err)
+		}
+		if got := secret.PlainTextString(); got != value {
+			t.Errorf("GetSecret() = %q, want %q", got, value)
+		}
 	}
 }

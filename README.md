@@ -129,7 +129,7 @@ config := &vault.Config{
     Type: vault.ProviderTypeExternal,
     External: &vault.ExternalConfig{
         Get: vault.CommandConfig{
-            CommandTemplate: "op read --no-newline '{{ref}}'",
+            CommandTemplate: "op read --no-newline '{{ref}}' && echo", // exactly one trailing newline, which GetSecret strips
         },
         // Where the link registry is kept.
         StoragePath: "~/.config/flow/vaults",
